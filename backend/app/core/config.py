@@ -2,6 +2,12 @@ import os
 
 from fastapi.security import OAuth2PasswordBearer
 
+
+def _parse_cors_origins(raw: str) -> list[str]:
+    """Parse comma-separated CORS origins from env var."""
+    return [o.strip().rstrip('/') for o in raw.split(',') if o.strip()]
+
+
 class Settings:
     secret_key: str = os.getenv('SECRET_KEY', 'replace-this-secret')
     algorithm: str = 'HS256'
@@ -15,6 +21,13 @@ class Settings:
     max_context_messages: int = int(os.getenv('MAX_CONTEXT_MESSAGES', '20'))
     model_request_timeout: int = int(os.getenv('MODEL_REQUEST_TIMEOUT', '120'))
     system_prompt: str | None = os.getenv('SYSTEM_PROMPT')
+
+    # CORS: comma-separated list of allowed origins.
+    # Example: CORS_ORIGINS=https://chat.midominio.com,http://localhost:5173
+    # Leave unset to allow all origins (development only).
+    cors_origins: list[str] = _parse_cors_origins(
+        os.getenv('CORS_ORIGINS', '')
+    )
 
 
 settings = Settings()

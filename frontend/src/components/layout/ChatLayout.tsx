@@ -441,7 +441,7 @@ export default function ChatLayout() {
 
       chatControllerRef.current = new AbortController()
       const token = getAuthToken()
-      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://10.0.0.84:8001'
+      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || ''
       const chatUrl = `${apiBaseUrl}/api/v1/conversations/${activeId}/chat`
 
       try {
@@ -599,20 +599,7 @@ export default function ChatLayout() {
   )
 
   return (
-    <section className={`grid min-h-[calc(100vh-5rem)] gap-0 ${showConversations ? 'lg:grid-cols-[260px_minmax(0,1fr)]' : 'grid-cols-1'}`}>
-      {/* Mobile Hamburger Button - Show when conversations are hidden */}
-      {!showConversations && (
-        <button
-          onClick={() => setShowConversations(true)}
-          aria-label="Abrir panel de conversaciones"
-          title="Conversaciones"
-          className="fixed left-0 top-20 z-30 flex h-12 w-12 items-center justify-center rounded-r-xl border border-l-0 border-slate-700 bg-slate-950/95 text-slate-300 transition hover:bg-slate-900 hover:text-slate-100 lg:hidden"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-5 w-5">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
-          </svg>
-        </button>
-      )}
+    <section className={`grid gap-0 ${showConversations ? 'grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)]' : 'grid-cols-1'}`} style={{height: 'calc(100vh - 3.5rem)'}}>
       {/* Sidebar / Conversations Panel */}
       {showConversations && (
         <>
@@ -622,29 +609,35 @@ export default function ChatLayout() {
             onClick={() => setShowConversations(false)}
             aria-hidden="true"
           />
-          <aside className="fixed left-0 top-20 bottom-0 z-20 w-screen max-w-[280px] flex flex-col gap-0 lg:relative lg:top-auto lg:z-auto lg:w-auto lg:max-w-none lg:bottom-auto lg:bg-transparent">
+          <aside className="fixed left-0 top-14 bottom-0 z-20 w-[260px] flex flex-col lg:relative lg:top-auto lg:bottom-auto lg:z-auto lg:w-auto lg:h-full">
             {/* Conversations History Card */}
-            <Card className="flex min-w-0 flex-col flex-1 max-h-full lg:max-h-[calc(100vh-9.5rem)] rounded-none lg:rounded-2xl border-none lg:border-slate-800 lg:bg-slate-950/60">
-              <div className="space-y-3">
+            <Card className="flex min-w-0 flex-col h-full overflow-hidden rounded-none lg:rounded-2xl border-none lg:border-slate-800 lg:bg-slate-950/60">
+              <div className="flex items-center justify-between gap-2 shrink-0">
                 <div>
                   <p className="text-xs uppercase tracking-[0.2em] text-slate-500 font-semibold">Chats</p>
-                  <h2 className="mt-1 text-lg lg:text-xl font-bold text-white">Conversaciones</h2>
+                  <h2 className="text-base font-bold text-white">Conversaciones</h2>
                 </div>
-                <div className="grid grid-cols-[1fr_auto] gap-2">
+                <div className="flex items-center gap-1.5">
                   <button
                     onClick={() => setShowConversations(false)}
                     aria-label="Ocultar conversaciones"
-                    className="min-w-0 rounded-xl border border-slate-700 px-3 py-2 text-xs font-bold text-slate-400 transition hover:border-slate-600 hover:text-slate-200"
+                    title="Ocultar"
+                    className="flex h-8 w-8 items-center justify-center rounded-xl border border-slate-700 text-slate-400 transition hover:border-slate-600 hover:text-slate-200"
                   >
-                    Ocultar
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-4 w-4">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
                   </button>
                   <button
                     onClick={handleCreate}
                     disabled={createMutation.isPending}
                     aria-label="Crear nueva conversación"
-                    className="rounded-xl bg-cyan-500 px-4 py-2 text-xs font-bold text-slate-950 transition hover:bg-cyan-400 disabled:opacity-50"
+                    title="Nueva conversación"
+                    className="flex h-8 w-8 items-center justify-center rounded-xl bg-cyan-500 text-slate-950 transition hover:bg-cyan-400 disabled:opacity-50"
                   >
-                    Nuevo
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="h-4 w-4">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                    </svg>
                   </button>
                 </div>
               </div>
@@ -677,7 +670,7 @@ export default function ChatLayout() {
               </div>
 
             {/* History List */}
-            <div className="mt-4 flex-1 overflow-y-auto space-y-2 pr-1 min-h-[120px]">
+            <div className="mt-4 flex-1 overflow-y-auto space-y-1.5 pr-1 min-h-0">
               {isLoadingList ? (
                 <div className="py-4 text-center text-sm text-slate-500" aria-live="polite">
                   <div className="mb-2">Cargando historial...</div>
@@ -784,40 +777,44 @@ export default function ChatLayout() {
       )}
 
       {/* Main Chat Panel */}
-      <article className="flex min-w-0 flex-col h-full gap-0">
+      <article className="flex min-w-0 flex-col overflow-hidden gap-0" style={{height: 'calc(100vh - 3.5rem)'}}>
         {/* Header */}
-        <div className="border-b border-slate-800 bg-slate-950/90 px-4 sm:px-6 py-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-xs text-slate-500 uppercase tracking-wider">VISOR</div>
-              <h1 className="text-lg font-semibold text-white">
-                {activeConversation ? sanitizeTitleForDisplay(activeConversation.title) : 'Chat rápido'}
-              </h1>
-            </div>
-            <div className="flex items-center gap-2">
+        <div className="border-b border-slate-800 bg-slate-950/90 px-4 py-3 shrink-0">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
               {!showConversations && (
                 <button
                   type="button"
                   onClick={() => setShowConversations(true)}
-                  className="lg:hidden rounded-xl border border-slate-700 px-3 py-2 text-xs font-bold text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
+                  aria-label="Mostrar conversaciones"
+                  title="Mostrar conversaciones"
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-slate-700 text-slate-400 transition hover:border-slate-600 hover:text-slate-100"
                 >
-                  Conversaciones
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-4 w-4">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+                  </svg>
                 </button>
               )}
-              {devMode && (
-                <span className="rounded-2xl border border-cyan-500/30 bg-cyan-950/30 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-cyan-300">
-                  Modo Dev activo
-                </span>
-              )}
+              <div className="min-w-0">
+                <div className="text-xs text-slate-500 uppercase tracking-wider">VISOR</div>
+                <h1 className="text-base font-semibold text-white truncate">
+                  {activeConversation ? sanitizeTitleForDisplay(activeConversation.title) : 'Chat rápido'}
+                </h1>
+              </div>
             </div>
+            {devMode && (
+              <span className="shrink-0 rounded-2xl border border-cyan-500/30 bg-cyan-950/30 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-cyan-300">
+                Modo Dev activo
+              </span>
+            )}
           </div>
         </div>
 
-        <Card className="min-h-[calc(100vh-11rem)] p-0 overflow-hidden flex flex-col flex-1 bg-slate-950/60 border-slate-800 rounded-2xl lg:rounded-2xl">
+        <Card className="flex-1 min-h-0 p-0 overflow-hidden flex flex-col bg-slate-950/60 border-slate-800 rounded-none lg:rounded-2xl lg:m-2">
           {activeConversation ? (
             <div className="flex flex-col flex-1 h-full">
               {/* Message History */}
-              <div className="flex-1 overflow-y-auto p-3 sm:p-5 lg:p-6 space-y-4 max-h-[calc(100vh-18rem)] min-h-[320px]">
+              <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
                 {isLoadingConversation ? (
                   <div className="flex items-center justify-center h-full text-slate-500 text-sm" aria-live="polite">
                     <div className="mb-3">Cargando mensajes...</div>

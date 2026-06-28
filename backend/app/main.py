@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.config import settings
 from app.api.v1.routes.auth import router as auth_router
 from app.api.v1.routes.health import router as health_router
 from app.api.v1.routes.conversations import router as conversations_router
@@ -40,15 +41,27 @@ app = FastAPI(
 
 
 # -----------------------------
-# CORS (permitir conexiones desde cualquier origen)
+# CORS
 # -----------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# If CORS_ORIGINS env var is set, use explicit list with credentials support.
+# Otherwise fall back to allow-all (suitable for local dev only).
+_cors_origins = settings.cors_origins
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 # -----------------------------

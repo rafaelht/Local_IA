@@ -7,9 +7,11 @@ services:
       - DATABASE_URL=sqlite:///./app.db
       - SECRET_KEY=supersecretchangeme
       - ACCESS_TOKEN_EXPIRE_MINUTES=60
+      - CORS_ORIGINS=https://liteia.rafaeldevs.lat,http://10.0.0.84:5173,http://home-nas.local:5173
     volumes:
       - ./backend:/app
       - ./backend/export:/app/export
+
   frontend:
     build: ./frontend
     ports:
@@ -18,6 +20,6 @@ services:
       - ./frontend:/app
       - /app/node_modules
     environment:
-      - VITE_API_BASE_URL=http://10.0.0.84:8001
+      - VITE_API_BASE_URL=
     depends_on:
       - backend
