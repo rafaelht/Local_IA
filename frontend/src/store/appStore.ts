@@ -7,6 +7,7 @@ interface AppState {
   devMode: boolean
   temperature: number
   contextLength: number
+  enableContextHistory: boolean
   defaultProvider: ProviderName
   defaultModel: string | null
   preferencesLoaded: boolean
@@ -14,6 +15,7 @@ interface AppState {
   setDevMode: (devMode: boolean) => void
   setTemperature: (temperature: number) => void
   setContextLength: (contextLength: number) => void
+  setEnableContextHistory: (enable: boolean) => void
   setDefaultProvider: (provider: ProviderName) => void
   setDefaultModel: (model: string | null) => void
   hydrateFromPreferences: (preferences: UserPreferences) => void
@@ -30,6 +32,7 @@ export const useAppStore = create<AppState>((set) => ({
   devMode: window.localStorage.getItem('dev_mode') === 'true',
   temperature: 0.7,
   contextLength: 2048,
+  enableContextHistory: window.localStorage.getItem('enable_context_history') !== 'false',
   defaultProvider: 'liteRT',
   defaultModel: null,
   preferencesLoaded: false,
@@ -43,6 +46,10 @@ export const useAppStore = create<AppState>((set) => ({
   },
   setTemperature: (temperature) => set({ temperature }),
   setContextLength: (contextLength) => set({ contextLength }),
+  setEnableContextHistory: (enableContextHistory) => {
+    window.localStorage.setItem('enable_context_history', String(enableContextHistory))
+    set({ enableContextHistory })
+  },
   setDefaultProvider: (defaultProvider) => set({ defaultProvider }),
   setDefaultModel: (defaultModel) => set({ defaultModel }),
   hydrateFromPreferences: (preferences) => {

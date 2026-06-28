@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, FormEvent, KeyboardEvent } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Card } from '../ui/card'
 import {
   useConversations,
@@ -6,12 +7,11 @@ import {
   useCreateConversation,
   useUpdateConversation,
   useDeleteConversation,
-  useAddMessage,
   useDeleteMessage,
 } from '../../hooks/useConversations'
 import { useProviderStore } from '../../store/providerStore'
 import { useAppStore } from '../../store/appStore'
-import { getProvider } from '../../hooks/useProvider'
+import { getAuthToken } from '../../utils/authHelpers'
 import { MessageBubble } from '../chat/MessageBubble'
 import Skeleton from '../ui/Skeleton'
 import { useRafState } from '../../hooks/useRafState'
@@ -88,6 +88,16 @@ function formatFileSize(size: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
 }
 
+function formatDuration(durationMs: number): string {
+  const seconds = Math.round(durationMs / 1000)
+  if (seconds >= 60) {
+    const minutes = Math.floor(seconds / 60)
+    const remainingSeconds = seconds % 60
+    return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`
+  }
+  return `${(durationMs / 1000).toFixed(2)} s`
+}
+
 function isTextFile(file: File): boolean {
   return (
     file.type.startsWith('text/') ||
@@ -98,6 +108,7 @@ function isTextFile(file: File): boolean {
       'application/typescript',
       'text/markdown',
       'text/csv',
+
     ].includes(file.type) ||
     /\.(md|txt|csv|json|xml|log|js|ts|tsx|jsx|py|html|css|yaml|yml)$/i.test(file.name)
   )
@@ -154,12 +165,18 @@ export default function ChatLayout() {
   const [inputText, setInputText] = useState('')
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   const [showConversations, setShowConversations] = useState(() => {
-    return window.localStorage.getItem('showConversations') !== 'false'
+    const stored = window.localStorage.getItem('showConversations')
+    if (stored !== null) {
+      return stored === 'true'
+    }
+    // Default: show on large screens, hide on mobile
+    return window.matchMedia('(min-width: 1024px)').matches
   })
 
   // Streaming & Metrics State
   const [isStreaming, setIsStreaming] = useState(false)
   const [streamingContent, setStreamingContent, resetStreamingContent] = useRafState('')
+  const [pendingUserMessage, setPendingUserMessage] = useState<string | null>(null)
   const [lastMetrics, setLastMetrics, resetLastMetrics] = useRafState<Metrics | null>(null)
 
   // Queries & Mutations
@@ -169,11 +186,11 @@ export default function ChatLayout() {
   const createMutation = useCreateConversation()
   const updateMutation = useUpdateConversation()
   const deleteMutation = useDeleteConversation()
-  const addMessageMutation = useAddMessage()
   const deleteMessageMutation = useDeleteMessage()
+  const queryClient = useQueryClient()
 
   // App / Settings Store
-  const { devMode, temperature, contextLength } = useAppStore()
+  const { devMode, temperature, contextLength, enableContextHistory } = useAppStore()
 
   // Provider Store
   const {
@@ -185,7 +202,35 @@ export default function ChatLayout() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const chatControllerRef = useRef<AbortController | null>(null)
   const wasStreamingRef = useRef(false)
+  const pendingStreamingBufferRef = useRef('')
+  const streamingFlushRef = useRef<number | null>(null)
+
+  const scheduleStreamingFlush = useCallback(() => {
+    if (streamingFlushRef.current !== null) return
+
+    const flushStep = () => {
+      const pending = pendingStreamingBufferRef.current
+      if (!pending) {
+        streamingFlushRef.current = null
+        return
+      }
+
+      const chunkSize = Math.min(4, Math.max(1, Math.ceil(pending.length / 20)))
+      const nextChunk = pending.slice(0, chunkSize)
+      pendingStreamingBufferRef.current = pending.slice(chunkSize)
+      setStreamingContent((current) => current + nextChunk)
+
+      if (pendingStreamingBufferRef.current.length > 0) {
+        streamingFlushRef.current = requestAnimationFrame(flushStep)
+      } else {
+        streamingFlushRef.current = null
+      }
+    }
+
+    streamingFlushRef.current = requestAnimationFrame(flushStep)
+  }, [setStreamingContent])
 
   // Simple sanitizer for display purposes: strip common JSX attribute fragments
   const sanitizeTitleForDisplay = (raw: string | undefined) => {
@@ -285,11 +330,14 @@ export default function ChatLayout() {
 
   const handleStop = useCallback(() => {
     try {
-      getProvider(selectedProvider).cancel()
+      if (chatControllerRef.current) {
+        chatControllerRef.current.abort()
+        chatControllerRef.current = null
+      }
     } catch (err) {
       console.error('Error al detener la generación:', err)
     }
-  }, [selectedProvider])
+  }, [])
 
   const handleAttachFiles = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return
@@ -364,21 +412,14 @@ export default function ChatLayout() {
       const promptForModel = appendAttachmentContext(userText, attachmentsForSend)
       const userContentForHistory = appendAttachmentSummary(userText || 'Revisa los archivos adjuntos.', attachmentsForSend)
 
-      // 1. Save user message to FastAPI database
-      if (!retryText) {
-        try {
-          await addMessageMutation.mutateAsync({
-            conversationId: activeId,
-            role: 'user',
-            content: userContentForHistory,
-          })
-        } catch (err) {
-          console.error('Error al guardar mensaje de usuario:', err)
-          return
-        }
-      }
+      setPendingUserMessage(userContentForHistory)
 
-      // 2. Set streaming states and initial metrics
+      // 1. Set streaming states and initial metrics
+      if (streamingFlushRef.current !== null) {
+        cancelAnimationFrame(streamingFlushRef.current)
+        streamingFlushRef.current = null
+      }
+      pendingStreamingBufferRef.current = ''
       setIsStreaming(true)
       resetStreamingContent('')
 
@@ -398,33 +439,84 @@ export default function ChatLayout() {
       let tokenCount = 0
       let accumulatedText = ''
 
-      try {
-        const providerClient = getProvider(selectedProvider)
+      chatControllerRef.current = new AbortController()
+      const token = getAuthToken()
+      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://10.0.0.84:8001'
+      const chatUrl = `${apiBaseUrl}/api/v1/conversations/${activeId}/chat`
 
-        await providerClient.stream(
-          promptForModel,
-          {
+      try {
+        const response = await fetch(chatUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            role: 'user',
+            content: promptForModel,
+            provider: selectedProvider,
             model: selectedModelValue,
             temperature,
             max_tokens: contextLength,
-            attachments: attachmentsForSend,
-          },
-          (chunk) => {
-            if (!firstTokenReceived) {
-              firstTokenReceived = true
-              currentMetrics.ttft = Math.round(performance.now() - startTime)
+            enable_context_history: enableContextHistory,
+          }),
+          signal: chatControllerRef.current.signal,
+        })
+
+        if (!response.ok) {
+          throw new Error(`Error del servidor: ${response.status} ${response.statusText}`)
+        }
+
+        const reader = response.body?.getReader()
+        if (!reader) {
+          throw new Error('El servidor no retornó un stream legible')
+        }
+
+        const decoder = new TextDecoder('utf-8')
+        let buffer = ''
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+
+          for (const line of lines) {
+            const cleanLine = line.trim()
+            if (!cleanLine) continue
+            if (cleanLine === 'data: [DONE]') {
+              continue
             }
+            if (cleanLine.startsWith('data: ')) {
+              try {
+                const dataStr = cleanLine.substring(6).trim()
+                if (!dataStr) continue
+                const parsed = JSON.parse(dataStr)
+                const chunk = parsed.choices?.[0]?.delta?.content || ''
+                if (!chunk) continue
 
-            accumulatedText += chunk
-            setStreamingContent(accumulatedText)
-            tokenCount += Math.max(1, Math.ceil(chunk.length / 4))
+                if (!firstTokenReceived) {
+                  firstTokenReceived = true
+                  currentMetrics.ttft = Math.round(performance.now() - startTime)
+                }
 
-            const elapsedSecs = (performance.now() - startTime) / 1000
-            currentMetrics.tokensPerSec = elapsedSecs > 0 ? Math.round(tokenCount / elapsedSecs) : 0
-            currentMetrics.outputTokens = tokenCount
-            setLastMetrics({ ...currentMetrics })
+                accumulatedText += chunk
+                pendingStreamingBufferRef.current += chunk
+                scheduleStreamingFlush()
+                tokenCount += Math.max(1, Math.ceil(chunk.length / 4))
+
+                const elapsedSecs = (performance.now() - startTime) / 1000
+                currentMetrics.tokensPerSec = elapsedSecs > 0 ? Math.round(tokenCount / elapsedSecs) : 0
+                currentMetrics.outputTokens = tokenCount
+                setLastMetrics({ ...currentMetrics })
+              } catch (err) {
+                console.error('Error al parsear fragmento SSE:', err, 'Línea:', cleanLine)
+              }
+            }
           }
-        )
+        }
 
         const endTime = performance.now()
         const duration = endTime - startTime
@@ -433,40 +525,26 @@ export default function ChatLayout() {
         currentMetrics.tokensPerSec = elapsedSecs > 0 ? Math.round(tokenCount / elapsedSecs) : 0
         setLastMetrics({ ...currentMetrics })
 
-        if (accumulatedText.trim()) {
-          await addMessageMutation.mutateAsync({
-            conversationId: activeId,
-            role: 'assistant',
-            content: accumulatedText.trim(),
+        if (shouldAutoTitle) {
+          await updateMutation.mutateAsync({
+            id: activeId,
+            title: createConversationTitle(userText),
           })
-          if (shouldAutoTitle) {
-            await updateMutation.mutateAsync({
-              id: activeId,
-              title: createConversationTitle(userText),
-            })
-          }
         }
+
+        await queryClient.invalidateQueries({ queryKey: ['conversation', activeId] })
+        await queryClient.invalidateQueries({ queryKey: ['conversations'] })
       } catch (err: any) {
         console.error('Error durante la generación:', err)
-        if (accumulatedText.trim()) {
-          try {
-            await addMessageMutation.mutateAsync({
-              conversationId: activeId,
-              role: 'assistant',
-              content: accumulatedText.trim(),
-            })
-            if (shouldAutoTitle) {
-              await updateMutation.mutateAsync({
-                id: activeId,
-                title: createConversationTitle(userText),
-              })
-            }
-          } catch (saveErr) {
-            console.error('Error al salvar respuesta parcial:', saveErr)
-          }
-        }
       } finally {
         setIsStreaming(false)
+        chatControllerRef.current = null
+        setPendingUserMessage(null)
+        pendingStreamingBufferRef.current = ''
+        if (streamingFlushRef.current !== null) {
+          cancelAnimationFrame(streamingFlushRef.current)
+          streamingFlushRef.current = null
+        }
         resetStreamingContent('')
       }
     },
@@ -477,15 +555,16 @@ export default function ChatLayout() {
       conversations,
       inputText,
       attachments,
-      addMessageMutation,
       updateMutation,
       selectedProvider,
       selectedProviderLabel,
       selectedModelValue,
       temperature,
       contextLength,
+      enableContextHistory,
       setLastMetrics,
       resetStreamingContent,
+      queryClient,
     ]
   )
 
@@ -520,209 +599,221 @@ export default function ChatLayout() {
   )
 
   return (
-    <section className={`grid min-h-[calc(100vh-6rem)] gap-4 lg:gap-6 lg:px-4 ${showConversations ? 'lg:grid-cols-[320px_minmax(0,1fr)]' : 'lg:grid-cols-1'}`}>
+    <section className={`grid min-h-[calc(100vh-5rem)] gap-0 ${showConversations ? 'lg:grid-cols-[260px_minmax(0,1fr)]' : 'grid-cols-1'}`}>
+      {/* Mobile Hamburger Button - Show when conversations are hidden */}
+      {!showConversations && (
+        <button
+          onClick={() => setShowConversations(true)}
+          aria-label="Abrir panel de conversaciones"
+          title="Conversaciones"
+          className="fixed left-0 top-20 z-30 flex h-12 w-12 items-center justify-center rounded-r-xl border border-l-0 border-slate-700 bg-slate-950/95 text-slate-300 transition hover:bg-slate-900 hover:text-slate-100 lg:hidden"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-5 w-5">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+          </svg>
+        </button>
+      )}
       {/* Sidebar / Conversations Panel */}
       {showConversations && (
-        <aside className="flex min-w-0 flex-col gap-4">
-          {/* Conversations History Card */}
-          <Card className="flex min-w-0 flex-col flex-1 max-h-[38vh] lg:max-h-[calc(100vh-14rem)]">
-            <div className="space-y-3">
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-slate-500 font-semibold">Chats</p>
-                <h2 className="mt-1 text-xl font-bold text-white">Conversaciones</h2>
+        <>
+          {/* Mobile overlay - tap to close */}
+          <div
+            className="fixed inset-0 z-10 bg-black/50 backdrop-blur-sm lg:hidden"
+            onClick={() => setShowConversations(false)}
+            aria-hidden="true"
+          />
+          <aside className="fixed left-0 top-20 bottom-0 z-20 w-screen max-w-[280px] flex flex-col gap-0 lg:relative lg:top-auto lg:z-auto lg:w-auto lg:max-w-none lg:bottom-auto lg:bg-transparent">
+            {/* Conversations History Card */}
+            <Card className="flex min-w-0 flex-col flex-1 max-h-full lg:max-h-[calc(100vh-9.5rem)] rounded-none lg:rounded-2xl border-none lg:border-slate-800 lg:bg-slate-950/60">
+              <div className="space-y-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-500 font-semibold">Chats</p>
+                  <h2 className="mt-1 text-lg lg:text-xl font-bold text-white">Conversaciones</h2>
+                </div>
+                <div className="grid grid-cols-[1fr_auto] gap-2">
+                  <button
+                    onClick={() => setShowConversations(false)}
+                    aria-label="Ocultar conversaciones"
+                    className="min-w-0 rounded-xl border border-slate-700 px-3 py-2 text-xs font-bold text-slate-400 transition hover:border-slate-600 hover:text-slate-200"
+                  >
+                    Ocultar
+                  </button>
+                  <button
+                    onClick={handleCreate}
+                    disabled={createMutation.isPending}
+                    aria-label="Crear nueva conversación"
+                    className="rounded-xl bg-cyan-500 px-4 py-2 text-xs font-bold text-slate-950 transition hover:bg-cyan-400 disabled:opacity-50"
+                  >
+                    Nuevo
+                  </button>
+                </div>
               </div>
-              <div className="grid grid-cols-[1fr_auto] gap-2">
-                <button
-                  onClick={() => setShowConversations(false)}
-                  aria-label="Ocultar conversaciones"
-                  className="min-w-0 rounded-xl border border-slate-700 px-3 py-2 text-xs font-bold text-slate-400 transition hover:border-slate-600 hover:text-slate-200"
-                >
-                  Ocultar
-                </button>
-                <button
-                  onClick={handleCreate}
-                  disabled={createMutation.isPending}
-                  aria-label="Crear nueva conversación"
-                  className="rounded-xl bg-cyan-500 px-4 py-2 text-xs font-bold text-slate-950 transition hover:bg-cyan-400 disabled:opacity-50"
-                >
-                  Nuevo
-                </button>
-              </div>
-            </div>
 
-            {/* Search bar */}
-            <div className="relative mt-4">
-              <input
-                type="text"
-                placeholder="Buscar chat..."
-                aria-label="Buscar conversaciones"
-                value={searchVal}
-                onChange={(e) => setSearchVal(e.target.value)}
-                className="w-full rounded-2xl border border-slate-700 bg-slate-950 pl-10 pr-8 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400 transition"
-              />
-              <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-slate-500">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-              </div>
-              {searchVal && (
-                <button
-                  onClick={() => setSearchVal('')}
-                  className="absolute inset-y-0 right-3 flex items-center text-slate-500 hover:text-slate-300"
-                >
+              {/* Search bar */}
+              <div className="relative mt-4">
+                <input
+                  type="text"
+                  placeholder="Buscar chat..."
+                  aria-label="Buscar conversaciones"
+                  value={searchVal}
+                  onChange={(e) => setSearchVal(e.target.value)}
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 pl-10 pr-8 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400 transition"
+                />
+                <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-slate-500">
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                   </svg>
-                </button>
+                </div>
+                {searchVal && (
+                  <button
+                    onClick={() => setSearchVal('')}
+                    className="absolute inset-y-0 right-3 flex items-center text-slate-500 hover:text-slate-300"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+
+            {/* History List */}
+            <div className="mt-4 flex-1 overflow-y-auto space-y-2 pr-1 min-h-[120px]">
+              {isLoadingList ? (
+                <div className="py-4 text-center text-sm text-slate-500" aria-live="polite">
+                  <div className="mb-2">Cargando historial...</div>
+                  <Skeleton count={4} />
+                </div>
+              ) : conversations.length === 0 ? (
+                <div className="py-8 text-center text-sm text-slate-500">
+                  {searchDebounced ? 'No se encontraron resultados.' : 'Sin conversaciones creadas.'}
+                </div>
+              ) : (
+                conversations.map((chat) => {
+                  const isActive = chat.id === activeId
+                  const isEditing = chat.id === editingId
+
+                  return (
+                    <div
+                      key={chat.id}
+                      className={`group flex items-center justify-between rounded-2xl border px-3 py-2.5 transition ${
+                        isActive
+                          ? 'border-cyan-500 bg-cyan-950/20 text-white'
+                          : 'border-slate-800 bg-slate-950/40 text-slate-300 hover:border-slate-700 hover:bg-slate-900/40'
+                      }`}
+                    >
+                        {isEditing ? (
+                        <input
+                          type="text"
+                          value={editTitle}
+                          onChange={(e) => setEditTitle(e.target.value)}
+                          onBlur={() => handleRename(chat.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleRename(chat.id)
+                            if (e.key === 'Escape') setEditingId(null)
+                          }}
+                          autoFocus
+                          className="flex-1 bg-slate-950 px-2 py-1 text-sm text-white rounded-xl outline-none border border-cyan-500"
+                        />
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setActiveId(chat.id)
+                            setEditingId(null)
+                            // Close panel on mobile after selecting
+                            if (window.matchMedia('(max-width: 1023px)').matches) {
+                              setShowConversations(false)
+                            }
+                          }}
+                          className="flex-1 text-left truncate text-sm font-medium py-0.5"
+                        >
+                          {chat.pinned && (
+                            <span className="inline-block mr-1.5 text-cyan-400" title="Fijado">
+                              📌
+                            </span>
+                          )}
+                          {sanitizeTitleForDisplay(chat.title)}
+                        </button>
+                      )}
+
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity ml-2">
+                        {!isEditing && (
+                          <>
+                            <button
+                              onClick={() => handleTogglePin(chat.id, chat.pinned)}
+                              className={`p-1 rounded-lg hover:bg-slate-800 transition ${
+                                chat.pinned ? 'text-cyan-400' : 'text-slate-500 hover:text-slate-300'
+                              }`}
+                              title={chat.pinned ? 'Desfijar' : 'Fijar'}
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3.5 h-3.5">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-3.75-3.75" />
+                              </svg>
+                            </button>
+                            <button
+                              onClick={() => {
+                                setEditingId(chat.id)
+                                setEditTitle(chat.title)
+                              }}
+                              className="p-1 rounded-lg text-slate-500 hover:bg-slate-800 hover:text-slate-300 transition"
+                              title="Renombrar"
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3.5 h-3.5">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                              </svg>
+                            </button>
+                            <button
+                              onClick={() => handleDelete(chat.id)}
+                              className="p-1 rounded-lg text-slate-500 hover:bg-slate-800 hover:text-rose-400 transition"
+                              title="Eliminar"
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3.5 h-3.5">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })
               )}
             </div>
-
-          {/* History List */}
-          <div className="mt-4 flex-1 overflow-y-auto space-y-2 pr-1 min-h-[120px]">
-            {isLoadingList ? (
-              <div className="py-4 text-center text-sm text-slate-500" aria-live="polite">
-                <div className="mb-2">Cargando historial...</div>
-                <Skeleton count={4} />
-              </div>
-            ) : conversations.length === 0 ? (
-              <div className="py-8 text-center text-sm text-slate-500">
-                {searchDebounced ? 'No se encontraron resultados.' : 'Sin conversaciones creadas.'}
-              </div>
-            ) : (
-              conversations.map((chat) => {
-                const isActive = chat.id === activeId
-                const isEditing = chat.id === editingId
-
-                return (
-                  <div
-                    key={chat.id}
-                    className={`group flex items-center justify-between rounded-2xl border px-3 py-2.5 transition ${
-                      isActive
-                        ? 'border-cyan-500 bg-cyan-950/20 text-white'
-                        : 'border-slate-800 bg-slate-950/40 text-slate-300 hover:border-slate-700 hover:bg-slate-900/40'
-                    }`}
-                  >
-                      {isEditing ? (
-                      <input
-                        type="text"
-                        value={editTitle}
-                        onChange={(e) => setEditTitle(e.target.value)}
-                        onBlur={() => handleRename(chat.id)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') handleRename(chat.id)
-                          if (e.key === 'Escape') setEditingId(null)
-                        }}
-                        autoFocus
-                        className="flex-1 bg-slate-950 px-2 py-1 text-sm text-white rounded-xl outline-none border border-cyan-500"
-                      />
-                    ) : (
-                      <button
-                        onClick={() => {
-                          setActiveId(chat.id)
-                          setEditingId(null)
-                        }}
-                        className="flex-1 text-left truncate text-sm font-medium py-0.5"
-                      >
-                        {chat.pinned && (
-                          <span className="inline-block mr-1.5 text-cyan-400" title="Fijado">
-                            📌
-                          </span>
-                        )}
-                        {sanitizeTitleForDisplay(chat.title)}
-                      </button>
-                    )}
-
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity ml-2">
-                      {!isEditing && (
-                        <>
-                          <button
-                            onClick={() => handleTogglePin(chat.id, chat.pinned)}
-                            className={`p-1 rounded-lg hover:bg-slate-800 transition ${
-                              chat.pinned ? 'text-cyan-400' : 'text-slate-500 hover:text-slate-300'
-                            }`}
-                            title={chat.pinned ? 'Desfijar' : 'Fijar'}
-                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3.5 h-3.5">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-3.75-3.75" />
-                            </svg>
-                          </button>
-                          <button
-                            onClick={() => {
-                              setEditingId(chat.id)
-                              setEditTitle(chat.title)
-                            }}
-                            className="p-1 rounded-lg text-slate-500 hover:bg-slate-800 hover:text-slate-300 transition"
-                            title="Renombrar"
-                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3.5 h-3.5">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                            </svg>
-                          </button>
-                          <button
-                            onClick={() => handleDelete(chat.id)}
-                            className="p-1 rounded-lg text-slate-500 hover:bg-slate-800 hover:text-rose-400 transition"
-                            title="Eliminar"
-                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3.5 h-3.5">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                            </svg>
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                )
-              })
-            )}
-          </div>
-        </Card>
-      </aside>
+          </Card>
+        </aside>
+        </>
       )}
 
       {/* Main Chat Panel */}
-      <article className="flex min-w-0 flex-col gap-4">
-        {/* Title */}
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex min-w-0 items-center gap-3">
-            {!showConversations && (
-              <div className="flex shrink-0 items-center gap-2">
+      <article className="flex min-w-0 flex-col h-full gap-0">
+        {/* Header */}
+        <div className="border-b border-slate-800 bg-slate-950/90 px-4 sm:px-6 py-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-xs text-slate-500 uppercase tracking-wider">VISOR</div>
+              <h1 className="text-lg font-semibold text-white">
+                {activeConversation ? sanitizeTitleForDisplay(activeConversation.title) : 'Chat rápido'}
+              </h1>
+            </div>
+            <div className="flex items-center gap-2">
+              {!showConversations && (
                 <button
                   type="button"
                   onClick={() => setShowConversations(true)}
-                  className="rounded-xl border border-slate-700 px-3 py-2 text-xs font-bold text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
+                  className="lg:hidden rounded-xl border border-slate-700 px-3 py-2 text-xs font-bold text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
                 >
                   Conversaciones
                 </button>
-                <button
-                  type="button"
-                  onClick={handleCreate}
-                  disabled={createMutation.isPending}
-                  aria-label="Crear nueva conversación"
-                  title="Nueva conversación"
-                  className="flex h-9 w-9 items-center justify-center rounded-xl bg-cyan-500 text-slate-950 transition hover:bg-cyan-400 disabled:opacity-50"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.2} stroke="currentColor" className="h-4 w-4">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897L16.862 4.487z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 7.125L16.875 4.5" />
-                  </svg>
-                </button>
-              </div>
-            )}
-            <div className="min-w-0">
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-500 font-semibold">Visor</p>
-            <h1 className="mt-1 truncate text-xl font-bold text-white sm:text-2xl">
-              {activeConversation ? sanitizeTitleForDisplay(activeConversation.title) : 'Chat rápido'}
-            </h1>
+              )}
+              {devMode && (
+                <span className="rounded-2xl border border-cyan-500/30 bg-cyan-950/30 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-cyan-300">
+                  Modo Dev activo
+                </span>
+              )}
             </div>
           </div>
-          {devMode && (
-            <span className="rounded-2xl border border-cyan-500/30 bg-cyan-950/30 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-cyan-300">
-              Modo Dev activo
-            </span>
-          )}
         </div>
 
-        <Card className="min-h-[calc(100vh-11rem)] p-0 overflow-hidden flex flex-col flex-1 bg-slate-950/70 border-slate-800">
+        <Card className="min-h-[calc(100vh-11rem)] p-0 overflow-hidden flex flex-col flex-1 bg-slate-950/60 border-slate-800 rounded-2xl lg:rounded-2xl">
           {activeConversation ? (
             <div className="flex flex-col flex-1 h-full">
               {/* Message History */}
@@ -733,7 +824,7 @@ export default function ChatLayout() {
                     <Skeleton count={6} />
                   </div>
                 ) : activeConversation.messages.length === 0 ? (
-                  <div className="rounded-3xl border border-slate-800 bg-slate-950/80 p-8 text-slate-400 shadow-inner shadow-slate-950/50 text-center">
+                  <div className="rounded-3xl border border-slate-800/50 bg-slate-950/50 p-6 sm:p-8 text-slate-400 shadow-inner shadow-slate-950/20 text-center">
                     <p className="font-medium text-slate-300">¡Nueva conversación iniciada!</p>
                     <p className="text-xs text-slate-500 mt-2">
                       Envía un mensaje para comenzar. Los mensajes se guardarán en tu historial de forma permanente.
@@ -753,22 +844,35 @@ export default function ChatLayout() {
 
                         {/* Retry Button under the last assistant message */}
                         {!isUser && isLastMessage && !isStreaming && (
-                          <div className="flex justify-start pl-2">
-                            <button
-                              onClick={handleRetry}
-                              className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-cyan-400 font-bold transition py-1"
-                              title="Reintentar generación"
-                            >
-                              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-3 h-3">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
-                              </svg>
-                              Reintentar
-                            </button>
+                          <div className="flex flex-col gap-2 pl-2">
+                            <div className="flex items-center gap-3">
+                              <button
+                                onClick={handleRetry}
+                                className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-cyan-400 font-bold transition py-1"
+                                title="Reintentar generación"
+                              >
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-3 h-3">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                </svg>
+                                Reintentar
+                              </button>
+                              {lastMetrics && lastMetrics.generationTime !== null && (
+                                <span className="rounded-full border border-slate-700 bg-slate-950/90 px-2 py-1 text-[10px] text-slate-500">
+                                  {formatDuration(lastMetrics.generationTime)} · {lastMetrics.tokensPerSec ?? 0} t/s
+                                </span>
+                              )}
+                            </div>
                           </div>
                         )}
                       </div>
                     )
                   })
+                )}
+
+                {pendingUserMessage && (
+                  <div className="space-y-1">
+                    <MessageBubble role="user" content={pendingUserMessage} />
+                  </div>
                 )}
 
                 {/* Streaming Content (rendered virtually during generation) */}
@@ -815,8 +919,8 @@ export default function ChatLayout() {
               )}
 
               {/* Chat Form */}
-              <form onSubmit={(e) => handleSendMessage(e)} className="border-t border-slate-800 bg-slate-950/90 px-2 py-3 sm:px-4 sm:py-4">
-                <div className="mx-auto max-w-3xl rounded-3xl border border-slate-700 bg-slate-900/90 px-3 py-2.5 shadow-lg shadow-slate-950/30 transition focus-within:border-cyan-400 sm:px-4 sm:py-3">
+              <form onSubmit={(e) => handleSendMessage(e)} className="border-t border-slate-800 bg-slate-950/90 p-4 sm:p-6">
+                <div className="rounded-3xl border border-slate-700 bg-slate-900/90 px-4 py-3 shadow-lg shadow-slate-950/30 transition focus-within:border-cyan-400">
                   <input
                     ref={fileInputRef}
                     type="file"
@@ -826,7 +930,7 @@ export default function ChatLayout() {
                     onChange={(event) => handleAttachFiles(event.target.files)}
                   />
                   {attachments.length > 0 && (
-                    <div className="mb-2 flex flex-wrap gap-2">
+                    <div className="mb-3 flex flex-wrap gap-2">
                       {attachments.map((attachment) => (
                         <span
                           key={attachment.id}
@@ -846,14 +950,14 @@ export default function ChatLayout() {
                       ))}
                     </div>
                   )}
-                  <div className="flex items-end gap-2">
+                  <div className="flex items-end gap-3">
                     <button
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
                       disabled={isStreaming}
                       aria-label="Adjuntar archivos"
                       title="Adjuntar archivos"
-                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-800 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-800 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.1} stroke="currentColor" className="h-5 w-5">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l9.9-9.9a3 3 0 114.243 4.243l-9.193 9.193a1.5 1.5 0 01-2.121-2.121l8.486-8.486" />
@@ -867,7 +971,7 @@ export default function ChatLayout() {
                       disabled={isStreaming}
                       rows={1}
                       aria-label="Escribe tu mensaje"
-                      className="max-h-[180px] min-h-[38px] flex-1 resize-none bg-transparent px-1 py-2 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500"
+                      className="max-h-[180px] min-h-[38px] flex-1 resize-none bg-transparent text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500"
                       placeholder={isStreaming ? "Generando respuesta..." : "Escribe tu mensaje..."}
                     />
                     <button
@@ -875,7 +979,7 @@ export default function ChatLayout() {
                       onClick={isStreaming ? handleStop : undefined}
                       disabled={!isStreaming && !inputText.trim() && attachments.length === 0}
                       aria-label={isStreaming ? 'Detener generación' : 'Enviar mensaje'}
-                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition disabled:cursor-not-allowed ${
+                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition disabled:cursor-not-allowed ${
                         isStreaming
                           ? 'bg-rose-500 text-white hover:bg-rose-400'
                           : 'bg-cyan-500 text-slate-950 hover:bg-cyan-400 disabled:bg-slate-700 disabled:text-slate-500'

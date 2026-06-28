@@ -5,7 +5,7 @@ from app.core.config import settings
 from app.core.jwt import create_access_token, decode_access_token
 from app.core.security import verify_password, hash_password
 from app.db.session import get_db
-from app.schemas.auth import LoginRequest
+from app.schemas.auth import LoginRequest, CreateUserRequest
 from app.schemas.token import Token
 from app.schemas.user import UserRead
 from app.db.models import User
@@ -16,8 +16,12 @@ router = APIRouter()
 from typing import Optional
 
 
-def authenticate_user(db: Session, email: str, password: str) -> Optional[User]:
-    user = db.query(User).filter(User.email == email).first()
+def authenticate_user(db: Session, email_or_nickname: str, password: str) -> Optional[User]:
+    # Try to find user by email first, then by nickname
+    user = db.query(User).filter(User.email == email_or_nickname).first()
+    if not user:
+        user = db.query(User).filter(User.nickname == email_or_nickname).first()
+    
     if not user or not verify_password(password, user.hashed_password):
         return None
     return user
@@ -37,7 +41,7 @@ def get_current_user(token: str = Depends(settings.oauth2_scheme), db: Session =
 
 @router.post('/login', response_model=Token)
 def login(form_data: LoginRequest, db: Session = Depends(get_db)) -> Token:
-    user = authenticate_user(db, form_data.email, form_data.password)
+    user = authenticate_user(db, form_data.email_or_nickname, form_data.password)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Credenciales inválidas')
 

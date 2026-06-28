@@ -10,6 +10,7 @@ import {
 } from '../hooks/usePreferences'
 import { useAppStore } from '../store/appStore'
 import { useProviderStore } from '../store/providerStore'
+import { createUser, listUsers, updateUser, deleteUser } from '../lib/api'
 import type { ProviderName } from '../providers/provider'
 
 export default function SettingsPage() {
@@ -26,12 +27,14 @@ export default function SettingsPage() {
     devMode,
     temperature,
     contextLength,
+    enableContextHistory,
     defaultProvider,
     defaultModel,
     setTheme,
     setDevMode,
     setTemperature,
     setContextLength,
+    setEnableContextHistory,
     setDefaultProvider,
     setDefaultModel,
   } = useAppStore()
@@ -41,6 +44,18 @@ export default function SettingsPage() {
   const [favoriteProvider, setFavoriteProvider] = useState<ProviderName>('liteRT')
   const [favoriteModelName, setFavoriteModelName] = useState('')
   const [saveMessage, setSaveMessage] = useState<string | null>(null)
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [users, setUsers] = useState<Array<{ id: number; email: string; nickname?: string; full_name?: string; role: string; is_active: boolean }>>([])
+  const [newUserEmail, setNewUserEmail] = useState('')
+  const [newUserPassword, setNewUserPassword] = useState('')
+  const [newUserNickname, setNewUserNickname] = useState('')
+  const [newUserFullName, setNewUserFullName] = useState('')
+  const [newUserRole, setNewUserRole] = useState<'user' | 'admin'>('user')
+  const [creatingUser, setCreatingUser] = useState(false)
+  const [loadingUsers, setLoadingUsers] = useState(false)
+  const [editingUserId, setEditingUserId] = useState<number | null>(null)
+  const [editingData, setEditingData] = useState<{ nickname?: string; full_name?: string; role?: string; password?: string; is_active?: boolean }>({})
+  const [editingPassword, setEditingPassword] = useState('')
 
   useEffect(() => {
     if (preferences) {
@@ -59,6 +74,23 @@ export default function SettingsPage() {
       setFavoriteModelName(selectedModel)
     }
   }, [selectedProvider, selectedModel])
+
+  // Check if current user is admin and load users list
+  useEffect(() => {
+    const loadUserData = async () => {
+      try {
+        const response = await listUsers()
+        if (response.status === 200) {
+          setIsAdmin(true)
+          setUsers(response.data)
+        }
+      } catch (err) {
+        // Not an admin, ignore error
+      }
+    }
+
+    loadUserData()
+  }, [])
 
   const persistPreferences = async (patch: Parameters<typeof updatePreferences.mutateAsync>[0]) => {
     try {
@@ -105,6 +137,86 @@ export default function SettingsPage() {
       temperature: favTemperature,
       context_length: favContextLength,
     })
+  }
+
+  const handleCreateUser = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!newUserEmail.trim() || !newUserPassword.trim()) return
+
+    setCreatingUser(true)
+    try {
+      await createUser(
+        newUserEmail.trim(),
+        newUserPassword.trim(),
+        newUserNickname.trim() || undefined,
+        newUserFullName.trim() || undefined,
+        newUserRole
+      )
+      setSaveMessage('Usuario creado exitosamente')
+      setNewUserEmail('')
+      setNewUserPassword('')
+      setNewUserNickname('')
+      setNewUserFullName('')
+      setNewUserRole('user')
+      
+      // Reload users list
+      const response = await listUsers()
+      if (response.status === 200) {
+        setUsers(response.data)
+      }
+      window.setTimeout(() => setSaveMessage(null), 2000)
+    } catch (err) {
+      console.error('Error al crear usuario:', err)
+      setSaveMessage('Error al crear usuario')
+      window.setTimeout(() => setSaveMessage(null), 2500)
+    } finally {
+      setCreatingUser(false)
+    }
+  }
+
+  const handleUpdateUser = async (userId: number) => {
+    try {
+      const updates = { ...editingData }
+      if (editingPassword) {
+        updates.password = editingPassword
+      }
+      await updateUser(userId, updates)
+      setSaveMessage('Usuario actualizado')
+      setEditingUserId(null)
+      setEditingData({})
+      setEditingPassword('')
+      
+      // Reload users list
+      const response = await listUsers()
+      if (response.status === 200) {
+        setUsers(response.data)
+      }
+      window.setTimeout(() => setSaveMessage(null), 2000)
+    } catch (err) {
+      console.error('Error al actualizar usuario:', err)
+      setSaveMessage('Error al actualizar usuario')
+      window.setTimeout(() => setSaveMessage(null), 2500)
+    }
+  }
+
+  const handleDeleteUser = async (userId: number) => {
+    if (!window.confirm('¿Estás seguro de que deseas borrar este usuario?')) return
+    
+    try {
+      await deleteUser(userId)
+      setSaveMessage('Usuario borrado')
+      
+      // Reload users list
+      const response = await listUsers()
+      if (response.status === 200) {
+        setUsers(response.data)
+      }
+      window.setTimeout(() => setSaveMessage(null), 2000)
+    } catch (err) {
+      console.error('Error al borrar usuario:', err)
+      setSaveMessage('Error al borrar usuario')
+      window.setTimeout(() => setSaveMessage(null), 2500)
+    }
   }
 
   if (isLoading) {
@@ -226,6 +338,34 @@ export default function SettingsPage() {
               </option>
             ))}
           </select>
+        </div>
+
+        <div>
+          <label className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3">
+            <span className="text-sm font-medium text-slate-200">Usar historial de contexto</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={enableContextHistory}
+              onClick={() => {
+                setEnableContextHistory(!enableContextHistory)
+              }}
+              className={`relative h-7 w-12 rounded-full transition ${
+                enableContextHistory ? 'bg-cyan-500' : 'bg-slate-700'
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 h-6 w-6 rounded-full bg-white transition ${
+                  enableContextHistory ? 'left-5' : 'left-0.5'
+                }`}
+              />
+            </button>
+          </label>
+          <p className="mt-2 text-xs text-slate-500">
+            {enableContextHistory 
+              ? '✓ El modelo tiene acceso a los últimos 15 mensajes de la conversación para mantener contexto.'
+              : '✗ Cada mensaje se trata como un chat independiente sin historial previo.'}
+          </p>
         </div>
       </Card>
 
@@ -363,6 +503,190 @@ export default function SettingsPage() {
           )}
         </div>
       </Card>
+
+      {isAdmin && (
+        <Card className="space-y-5">
+          <div>
+            <h2 className="text-lg font-bold text-white">Gestión de usuarios</h2>
+            <p className="mt-1 text-sm text-slate-400">Crea nuevos usuarios con rol de administrador o usuario normal.</p>
+          </div>
+
+          <form onSubmit={handleCreateUser} className="space-y-3">
+            <div>
+              <label className="mb-2 block text-sm text-slate-300">Email</label>
+              <input
+                type="email"
+                value={newUserEmail}
+                onChange={(e) => setNewUserEmail(e.target.value)}
+                placeholder="usuario@ejemplo.com"
+                disabled={creatingUser}
+                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400 disabled:opacity-50"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm text-slate-300">Nickname (para login)</label>
+              <input
+                type="text"
+                value={newUserNickname}
+                onChange={(e) => setNewUserNickname(e.target.value)}
+                placeholder="nickname_opcional"
+                disabled={creatingUser}
+                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400 disabled:opacity-50"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm text-slate-300">Nombre completo</label>
+              <input
+                type="text"
+                value={newUserFullName}
+                onChange={(e) => setNewUserFullName(e.target.value)}
+                placeholder="Nombre del usuario"
+                disabled={creatingUser}
+                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400 disabled:opacity-50"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm text-slate-300">Contraseña</label>
+              <input
+                type="password"
+                value={newUserPassword}
+                onChange={(e) => setNewUserPassword(e.target.value)}
+                placeholder="Contraseña segura"
+                disabled={creatingUser}
+                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400 disabled:opacity-50"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm text-slate-300">Rol</label>
+              <select
+                value={newUserRole}
+                onChange={(e) => setNewUserRole(e.target.value as 'user' | 'admin')}
+                disabled={creatingUser}
+                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400 disabled:opacity-50"
+              >
+                <option value="user">Usuario normal</option>
+                <option value="admin">Administrador</option>
+              </select>
+            </div>
+
+            <button
+              type="submit"
+              disabled={creatingUser || !newUserEmail.trim() || !newUserPassword.trim()}
+              className="w-full rounded-xl bg-cyan-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-cyan-400 disabled:opacity-50"
+            >
+              {creatingUser ? 'Creando...' : 'Crear usuario'}
+            </button>
+          </form>
+
+          <div className="pt-3">
+            <h3 className="mb-3 text-sm font-semibold text-slate-300">Usuarios registrados</h3>
+            <div className="space-y-2">
+              {loadingUsers ? (
+                <p className="text-sm text-slate-500">Cargando usuarios...</p>
+              ) : users.length === 0 ? (
+                <p className="rounded-2xl border border-dashed border-slate-800 px-4 py-3 text-center text-sm text-slate-500">
+                  No hay usuarios registrados.
+                </p>
+              ) : (
+                <div className="max-h-96 space-y-2 overflow-y-auto">
+                  {users.map((user) => (
+                    <div key={user.id}>
+                      {editingUserId === user.id ? (
+                        <div className="rounded-2xl border border-slate-700 bg-slate-900 p-3 space-y-2">
+                          <input
+                            type="text"
+                            value={editingData.nickname || user.nickname || ''}
+                            onChange={(e) => setEditingData({ ...editingData, nickname: e.target.value })}
+                            placeholder="Nickname"
+                            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-cyan-400"
+                          />
+                          <input
+                            type="text"
+                            value={editingData.full_name || user.full_name || ''}
+                            onChange={(e) => setEditingData({ ...editingData, full_name: e.target.value })}
+                            placeholder="Nombre completo"
+                            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-cyan-400"
+                          />
+                          <input
+                            type="password"
+                            value={editingPassword}
+                            onChange={(e) => setEditingPassword(e.target.value)}
+                            placeholder="Nueva contraseña (dejar en blanco para no cambiar)"
+                            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-cyan-400"
+                          />
+                          <select
+                            value={editingData.role || user.role}
+                            onChange={(e) => setEditingData({ ...editingData, role: e.target.value })}
+                            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-cyan-400"
+                          >
+                            <option value="user">Usuario normal</option>
+                            <option value="admin">Administrador</option>
+                          </select>
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateUser(user.id)}
+                              className="flex-1 rounded-lg bg-cyan-500 px-2 py-1.5 text-xs font-bold text-slate-950 hover:bg-cyan-400"
+                            >
+                              Guardar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingUserId(null)
+                                setEditingData({})
+                                setEditingPassword('')
+                              }}
+                              className="flex-1 rounded-lg border border-slate-700 px-2 py-1.5 text-xs font-bold text-slate-400 hover:bg-slate-800"
+                            >
+                              Cancelar
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-start justify-between rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3">
+                          <div>
+                            <p className="text-sm font-semibold text-white">{user.email}</p>
+                            {user.nickname && <p className="text-xs text-cyan-400">@{user.nickname}</p>}
+                            {user.full_name && <p className="text-xs text-slate-400">{user.full_name}</p>}
+                            <p className="text-xs text-slate-500">
+                              {user.role === 'admin' ? '👑 Administrador' : 'Usuario normal'} · {user.is_active ? 'Activo' : 'Inactivo'}
+                            </p>
+                          </div>
+                          <div className="flex flex-col items-end gap-1">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingUserId(user.id)
+                                setEditingData({ role: user.role, nickname: user.nickname, full_name: user.full_name })
+                                setEditingPassword('')
+                              }}
+                              className="rounded-lg border border-slate-700 px-2 py-1 text-xs font-bold text-slate-400 transition hover:bg-slate-800"
+                            >
+                              Editar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteUser(user.id)}
+                              className="rounded-lg border border-rose-700/40 px-2 py-1 text-xs font-bold text-rose-400 transition hover:bg-rose-950/30"
+                            >
+                              Borrar
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </Card>
+      )}
     </section>
   )
 }

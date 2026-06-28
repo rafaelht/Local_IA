@@ -31,6 +31,17 @@ class ConversationUpdate(BaseModel):
     favorite: Optional[bool] = None
 
 
+class ChatRequest(BaseModel):
+    role: str = 'user'
+    content: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    max_context_messages: Optional[int] = None
+    enable_context_history: Optional[bool] = True
+
+
 class ConversationRead(BaseModel):
     id: int
     title: str

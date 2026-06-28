@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link, Outlet, useNavigate } from 'react-router-dom'
 import { useTheme } from '../../hooks/useTheme'
 import { usePreferencesSync } from '../../hooks/usePreferencesSync'
@@ -14,6 +14,7 @@ export default function AppShell() {
   const setUserEmail = useAuthStore((state) => state.setUserEmail)
   const navigate = useNavigate()
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
+  const userMenuRef = useRef<HTMLDivElement>(null)
 
   function handleLogout() {
     setToken(null)
@@ -22,10 +23,24 @@ export default function AppShell() {
     navigate('/login')
   }
 
+  // Close user menu when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (userMenuRef.current && !userMenuRef.current.contains(event.target as Node)) {
+        setIsUserMenuOpen(false)
+      }
+    }
+
+    if (isUserMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+      return () => document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [isUserMenuOpen])
+
   return (
     <div className="min-h-screen bg-background text-slate-100">
       <header className="border-b border-slate-700/80 bg-slate-950/90 px-4 py-4 backdrop-blur-md">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3">
+        <div className="mx-auto flex max-w-full items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <Link to="/" className="text-xl font-semibold text-white">
               Local LLM Interface
@@ -44,7 +59,7 @@ export default function AppShell() {
               </Link>
             )}
             {token ? (
-              <div className="relative">
+              <div className="relative" ref={userMenuRef}>
                 <button
                   type="button"
                   onClick={() => setIsUserMenuOpen((value) => !value)}
@@ -79,7 +94,7 @@ export default function AppShell() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl px-4 py-6">
+      <main className="w-full">
         <Outlet />
       </main>
     </div>

@@ -1,19 +1,29 @@
 from datetime import datetime
-from typing import Optional
+from typing import Generator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.v1.routes.auth import get_current_user
-from app.core.jwt import decode_access_token
+from app.core.config import settings
 from app.db.models import Conversation, Message, User
 from app.db.session import get_db
 from app.schemas.conversation import (
+    ChatRequest,
     ConversationCreate,
     ConversationRead,
     ConversationUpdate,
     MessageCreate,
     MessageRead,
+)
+from app.services.chat import (
+    build_chat_history,
+    get_provider_url,
+    get_recent_messages,
+    build_model_payload,
+    stream_provider_response,
+    save_assistant_message,
 )
 
 router = APIRouter()
@@ -121,6 +131,62 @@ def create_message(
     db.commit()
     db.refresh(message)
     return message
+
+
+@router.post('/{conversation_id}/chat')
+def chat(
+    conversation_id: int,
+    chat_request: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    if chat_request.role != 'user':
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Only user messages are supported for chat')
+
+    conversation = get_user_conversation(db, conversation_id, current_user.id)
+
+    user_message = Message(
+        conversation_id=conversation.id,
+        role='user',
+        content=chat_request.content,
+    )
+    db.add(user_message)
+    conversation.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(user_message)
+
+    max_context_messages = chat_request.max_context_messages or settings.max_context_messages
+    
+    # If context history is disabled, only get the current message (no previous context)
+    if chat_request.enable_context_history is False:
+        max_context_messages = 1
+    else:
+        # Limit to 15 messages when context history is enabled
+        max_context_messages = min(max_context_messages, 15)
+    
+    recent_messages = get_recent_messages(db, conversation.id, max_context_messages)
+    messages = build_chat_history(recent_messages, settings.system_prompt)
+
+    provider_name = chat_request.provider or getattr(current_user.preferences, 'default_provider', 'liteRT')
+    model_name = chat_request.model or getattr(current_user.preferences, 'default_model', None)
+    temperature = chat_request.temperature if chat_request.temperature is not None else getattr(current_user.preferences, 'temperature', 0.7)
+    max_tokens = chat_request.max_tokens if chat_request.max_tokens is not None else getattr(current_user.preferences, 'context_length', None)
+
+    payload = build_model_payload(provider_name, model_name, temperature, max_tokens, messages)
+    provider_url = get_provider_url(provider_name)
+    assistant_parts: list[str] = []
+
+    def event_stream() -> Generator[bytes, None, None]:
+        for chunk in stream_provider_response(provider_url, payload, assistant_parts):
+            yield chunk
+
+        assistant_text = ''.join(assistant_parts).strip()
+        if assistant_text:
+            save_assistant_message(db, conversation.id, assistant_text)
+            conversation.updated_at = datetime.utcnow()
+            db.commit()
+
+    return StreamingResponse(event_stream(), media_type='text/event-stream')
 
 
 @router.delete('/{conversation_id}/messages/{message_id}', status_code=status.HTTP_204_NO_CONTENT)
