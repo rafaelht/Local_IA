@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Generator, Optional
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
@@ -145,10 +146,15 @@ def chat(
 
     conversation = get_user_conversation(db, conversation_id, current_user.id)
 
+    # Convert content to JSON string if it's a list (for vision messages with images)
+    message_content = chat_request.content
+    if isinstance(message_content, list):
+        message_content = json.dumps(message_content, ensure_ascii=False)
+
     user_message = Message(
         conversation_id=conversation.id,
         role='user',
-        content=chat_request.content,
+        content=message_content,
     )
     db.add(user_message)
     conversation.updated_at = datetime.utcnow()

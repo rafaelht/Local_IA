@@ -38,8 +38,8 @@ export default function AppShell() {
   }, [isUserMenuOpen])
 
   return (
-    <div className="min-h-screen bg-background text-slate-100">
-      <header className="flex h-14 items-center border-b border-slate-700/80 bg-slate-950/90 px-4 backdrop-blur-md">
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      <header className="fixed top-0 left-0 right-0 z-50 flex h-14 items-center border-b border-slate-700/80 bg-slate-950/95 px-4 backdrop-blur-md">
         <div className="mx-auto flex max-w-full items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <Link to="/" className="text-xl font-semibold text-white">
@@ -94,7 +94,7 @@ export default function AppShell() {
         </div>
       </header>
 
-      <main className="w-full" style={{height: 'calc(100vh - 3.5rem)'}}>
+      <main className="w-full" style={{marginTop: '3.5rem', height: 'calc(100vh - 3.5rem)', overflow: 'hidden'}}>
         <Outlet />
       </main>
     </div>

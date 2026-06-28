@@ -21,13 +21,26 @@ def get_recent_messages(db: Session, conversation_id: int, max_messages: int) ->
     )
 
 
-def build_chat_history(messages: list[Message], system_prompt: str | None = None) -> list[dict[str, str]]:
+def build_chat_history(messages: list[Message], system_prompt: str | None = None) -> list[dict]:
+    """Build chat history, preserving complex content (text + images)."""
     history = []
     if system_prompt:
         history.append({'role': 'system', 'content': system_prompt})
 
     for message in messages:
-        history.append({'role': message.role, 'content': message.content})
+        # Try to parse content as JSON (for vision messages with images)
+        content = message.content
+        try:
+            # If content is JSON-serialized list, parse it
+            if content.startswith('['):
+                parsed = json.loads(content)
+                if isinstance(parsed, list):
+                    content = parsed
+        except (json.JSONDecodeError, AttributeError):
+            # If not JSON or not a list, keep as string
+            pass
+        
+        history.append({'role': message.role, 'content': content})
 
     return history
 
@@ -43,7 +56,7 @@ def build_model_payload(
     model: str | None,
     temperature: float | None,
     max_tokens: int | None,
-    messages: list[dict[str, str]],
+    messages: list[dict],
 ) -> dict:
     payload = {
         'model': model or 'default',

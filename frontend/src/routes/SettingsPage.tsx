@@ -228,7 +228,8 @@ export default function SettingsPage() {
   }
 
   return (
-    <section className="mx-auto max-w-3xl space-y-6">
+    <div className="h-full bg-slate-950 overflow-y-auto">
+      <section className="mx-auto max-w-3xl space-y-6 px-4 py-8 sm:py-12">
       <div className="flex items-end justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-[0.2em] text-slate-500 font-semibold">Configuración</p>
@@ -687,6 +688,7 @@ export default function SettingsPage() {
           </div>
         </Card>
       )}
-    </section>
+      </section>
+    </div>
   )
 }

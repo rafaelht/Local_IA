@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 
 from pydantic import BaseModel
 
@@ -33,7 +33,10 @@ class ConversationUpdate(BaseModel):
 
 class ChatRequest(BaseModel):
     role: str = 'user'
-    content: str
+    # Content can be a string or a list of content blocks (for vision models)
+    # String: "texto..."
+    # List: [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}]
+    content: Union[str, list[dict]] = None
     provider: Optional[str] = None
     model: Optional[str] = None
     temperature: Optional[float] = None

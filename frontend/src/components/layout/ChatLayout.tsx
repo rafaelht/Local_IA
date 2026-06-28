@@ -132,22 +132,26 @@ function readFileAsDataUrl(file: File): Promise<string> {
   })
 }
 
-function appendAttachmentContext(prompt: string, attachments: ChatAttachment[]): string {
+function buildChatContent(prompt: string, attachments: ChatAttachment[]): string | any[] {
   if (attachments.length === 0) return prompt
 
-  const sections = attachments.map((attachment) => {
-    if (attachment.kind === 'text' && attachment.content) {
-      return `Archivo: ${attachment.name}\nTipo: ${attachment.type || 'texto'}\nContenido:\n${attachment.content.slice(0, 12000)}`
+  const content: any[] = [{ type: 'text', text: prompt }]
+
+  for (const attachment of attachments) {
+    if (attachment.kind === 'image' && attachment.dataUrl) {
+      // attachment.dataUrl is already data:image/...;base64,...
+      content.push({
+        type: 'image_url',
+        image_url: { url: attachment.dataUrl }
+      })
+    } else if (attachment.kind === 'text' && attachment.content) {
+      content[0].text += `\n\nArchivo: ${attachment.name}\nTipo: ${attachment.type || 'texto'}\nContenido:\n${attachment.content.slice(0, 12000)}`
+    } else {
+      content[0].text += `\n\nArchivo adjunto: ${attachment.name} (${attachment.type || 'archivo'}, ${formatFileSize(attachment.size)}). No se pudo extraer su contenido en el navegador.`
     }
+  }
 
-    if (attachment.kind === 'image') {
-      return `Imagen adjunta: ${attachment.name} (${attachment.type || 'imagen'}, ${formatFileSize(attachment.size)}). Analiza la imagen si el modelo actual soporta vision.`
-    }
-
-    return `Archivo adjunto: ${attachment.name} (${attachment.type || 'archivo'}, ${formatFileSize(attachment.size)}). No se pudo extraer su contenido en el navegador.`
-  })
-
-  return `${prompt}\n\nAdjuntos:\n${sections.map((section, index) => `[${index + 1}]\n${section}`).join('\n\n')}`
+  return content
 }
 
 function appendAttachmentSummary(prompt: string, attachments: ChatAttachment[]): string {
@@ -164,6 +168,8 @@ export default function ChatLayout() {
   const [editTitle, setEditTitle] = useState('')
   const [inputText, setInputText] = useState('')
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
+  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null)
+  const [deletingId, setDeletingId] = useState<number | null>(null)
   const [showConversations, setShowConversations] = useState(() => {
     const stored = window.localStorage.getItem('showConversations')
     if (stored !== null) {
@@ -254,10 +260,12 @@ export default function ChatLayout() {
     fetchModelsAndCheckHealth()
   }, [])
 
-  // Scroll to bottom when messages list or streaming content updates
+  // Scroll to bottom only when streaming (new content being generated)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'auto' })
-  }, [activeConversation?.messages, streamingContent])
+    if (streamingContent) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' })
+    }
+  }, [streamingContent])
 
   useEffect(() => {
     if (wasStreamingRef.current && !isStreaming) {
@@ -315,17 +323,29 @@ export default function ChatLayout() {
 
   const handleDelete = useCallback(
     async (id: number) => {
-      if (!window.confirm('¿Estás seguro de que deseas eliminar esta conversación?')) return
+      setDeleteConfirmId(id)
+    },
+    []
+  )
+
+  const confirmDelete = useCallback(
+    async () => {
+      if (deleteConfirmId === null) return
+      setDeletingId(deleteConfirmId)
       try {
-        await deleteMutation.mutateAsync(id)
-        if (activeId === id) {
+        await deleteMutation.mutateAsync(deleteConfirmId)
+        if (activeId === deleteConfirmId) {
           setActiveId(null)
         }
+        setDeleteConfirmId(null)
       } catch (err) {
         console.error('Error al eliminar:', err)
+        setDeleteConfirmId(null)
+      } finally {
+        setDeletingId(null)
       }
     },
-    [activeId, deleteMutation]
+    [deleteConfirmId, activeId, deleteMutation]
   )
 
   const handleStop = useCallback(() => {
@@ -409,7 +429,7 @@ export default function ChatLayout() {
         !retryText &&
         currentConversation?.messages.length === 0 &&
         currentConversation.title.trim().toLowerCase() === 'nueva conversación'
-      const promptForModel = appendAttachmentContext(userText, attachmentsForSend)
+      const promptForModel = buildChatContent(userText, attachmentsForSend)
       const userContentForHistory = appendAttachmentSummary(userText || 'Revisa los archivos adjuntos.', attachmentsForSend)
 
       setPendingUserMessage(userContentForHistory)
@@ -453,7 +473,7 @@ export default function ChatLayout() {
           },
           body: JSON.stringify({
             role: 'user',
-            content: promptForModel,
+            content: promptForModel,  // Can be string or array with images
             provider: selectedProvider,
             model: selectedModelValue,
             temperature,
@@ -599,7 +619,7 @@ export default function ChatLayout() {
   )
 
   return (
-    <section className={`grid gap-0 ${showConversations ? 'grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)]' : 'grid-cols-1'}`} style={{height: 'calc(100vh - 3.5rem)'}}>
+    <section className={`grid ${showConversations ? 'grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)]' : 'grid-cols-1'}`} style={{height: 'calc(100vh - 3.5rem)'}}>
       {/* Sidebar / Conversations Panel */}
       {showConversations && (
         <>
@@ -611,8 +631,8 @@ export default function ChatLayout() {
           />
           <aside className="fixed left-0 top-14 bottom-0 z-20 w-[260px] flex flex-col lg:relative lg:top-auto lg:bottom-auto lg:z-auto lg:w-auto lg:h-full">
             {/* Conversations History Card */}
-            <Card className="flex min-w-0 flex-col h-full overflow-hidden rounded-none lg:rounded-2xl border-none lg:border-slate-800 lg:bg-slate-950/60">
-              <div className="flex items-center justify-between gap-2 shrink-0">
+            <Card className="flex min-w-0 flex-col h-full overflow-hidden p-0 rounded-none lg:rounded-2xl border-none lg:border-slate-800 lg:bg-slate-950/60">
+              <div className="flex items-center justify-between gap-2 shrink-0 px-4 pt-4 pb-0">
                 <div>
                   <p className="text-xs uppercase tracking-[0.2em] text-slate-500 font-semibold">Chats</p>
                   <h2 className="text-base font-bold text-white">Conversaciones</h2>
@@ -643,7 +663,7 @@ export default function ChatLayout() {
               </div>
 
               {/* Search bar */}
-              <div className="relative mt-4">
+              <div className="relative mt-4 px-4 pb-4">
                 <input
                   type="text"
                   placeholder="Buscar chat..."
@@ -670,7 +690,7 @@ export default function ChatLayout() {
               </div>
 
             {/* History List */}
-            <div className="mt-4 flex-1 overflow-y-auto space-y-1.5 pr-1 min-h-0">
+            <div className="mt-4 flex-1 overflow-y-auto space-y-1.5 px-4 min-h-0 pb-4">
               {isLoadingList ? (
                 <div className="py-4 text-center text-sm text-slate-500" aria-live="polite">
                   <div className="mb-2">Cargando historial...</div>
@@ -810,11 +830,11 @@ export default function ChatLayout() {
           </div>
         </div>
 
-        <Card className="flex-1 min-h-0 p-0 overflow-hidden flex flex-col bg-slate-950/60 border-slate-800 rounded-none lg:rounded-2xl lg:m-2">
+        <Card className="flex-1 min-h-0 p-0 overflow-hidden flex flex-col bg-slate-950/60 border-slate-800 rounded-none lg:rounded-none">
           {activeConversation ? (
             <div className="flex flex-col flex-1 h-full">
               {/* Message History */}
-              <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
+              <div className="flex-1 overflow-y-auto p-4 sm:p-6 pb-0 space-y-4">
                 {isLoadingConversation ? (
                   <div className="flex items-center justify-center h-full text-slate-500 text-sm" aria-live="polite">
                     <div className="mb-3">Cargando mensajes...</div>
@@ -1015,6 +1035,64 @@ export default function ChatLayout() {
           )}
         </Card>
       </article>
+
+      {/* Delete Confirmation Modal */}
+      {deleteConfirmId !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="relative w-full max-w-sm rounded-3xl border border-slate-700 bg-slate-900 p-6 shadow-xl">
+            {/* Close Button */}
+            <button
+              onClick={() => setDeleteConfirmId(null)}
+              className="absolute right-4 top-4 text-slate-400 hover:text-slate-200 transition"
+              aria-label="Cerrar"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+
+            {/* Content */}
+            <div className="mb-6 text-center">
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-rose-500/20">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-6 w-6 text-rose-400">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c.866.276 1.753.519 2.654.72m15.298-1.279a47.863 47.863 0 00-2.603-.148dp3c-1.306 0-2.591.134-3.859.388m0 0a48.159 48.159 0 00-7.228-1.00c-3.798 0-7.35.75-10.584 2.118m7.422 6.609c1.395.37 2.821.645 4.266.822m7.422-6.609a48.159 48.159 0 00-7.228-1.00c-3.798 0-7.35.75-10.584 2.118m15.298 1.279c.866-.276 1.753-.519 2.654-.72M4.883 12.935c.378-.01.755-.009 1.131.014m15.298-1.279c1.306 0 2.59-.134 3.859-.388" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-bold text-white mb-2">¿Eliminar conversación?</h3>
+              <p className="text-sm text-slate-400">
+                Esta acción no se puede deshacer. La conversación y todo su historial se eliminarán permanentemente.
+              </p>
+            </div>
+
+            {/* Buttons */}
+            <div className="flex gap-3">
+              <button
+                onClick={() => setDeleteConfirmId(null)}
+                disabled={deletingId !== null}
+                className="flex-1 rounded-2xl border border-slate-700 px-4 py-2.5 text-sm font-semibold text-slate-300 transition hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={confirmDelete}
+                disabled={deletingId !== null}
+                className="flex-1 rounded-2xl bg-rose-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-rose-400 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                {deletingId !== null ? (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4 animate-spin">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12a3 3 0 100-6 3 3 0 000 6z" />
+                    </svg>
+                    Eliminando...
+                  </>
+                ) : (
+                  'Sí, eliminar'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   )
 }
