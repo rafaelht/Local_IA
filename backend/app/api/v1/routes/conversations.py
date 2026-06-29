@@ -215,18 +215,35 @@ def chat(
         response_token_reserve = min(response_token_reserve, settings.history_response_token_cap)
 
     if history_enabled and settings.enable_conversation_summary:
+        summary_threshold_reached = len(raw_messages) >= settings.summary_trigger_messages
         if settings.summary_in_request_path:
-            summary_result = maybe_refresh_conversation_summary(
-                db,
-                conversation.id,
-                raw_messages,
-                provider_name,
-                current_user.preferences,
-                model_name,
-                temperature,
-            )
+            if summary_threshold_reached:
+                summary_result = maybe_refresh_conversation_summary(
+                    db,
+                    conversation.id,
+                    raw_messages,
+                    provider_name,
+                    current_user.preferences,
+                    model_name,
+                    temperature,
+                )
+            else:
+                summary_result = SummaryRefreshResult(
+                    summary_text=None,
+                    covered_until_message_id=None,
+                    summary_generation_ms=0,
+                    summary_used=False,
+                )
         else:
-            summary_result = get_conversation_summary_state(db, conversation.id)
+            if summary_threshold_reached:
+                summary_result = get_conversation_summary_state(db, conversation.id)
+            else:
+                summary_result = SummaryRefreshResult(
+                    summary_text=None,
+                    covered_until_message_id=None,
+                    summary_generation_ms=0,
+                    summary_used=False,
+                )
     else:
         summary_result = SummaryRefreshResult(
             summary_text=None,
@@ -327,6 +344,25 @@ def chat(
             saved_assistant = save_assistant_message(db, conversation.id, assistant_text)
             conversation.updated_at = datetime.utcnow()
             db.commit()
+
+            if history_enabled and settings.enable_conversation_summary and not settings.summary_in_request_path:
+                summary_source_messages = [*raw_messages, {
+                    'id': saved_assistant.id,
+                    'role': saved_assistant.role,
+                    'content': saved_assistant.content,
+                }]
+                try:
+                    maybe_refresh_conversation_summary(
+                        db,
+                        conversation.id,
+                        summary_source_messages,
+                        provider_name,
+                        current_user.preferences,
+                        resolved_model_name,
+                        temperature,
+                    )
+                except RuntimeError:
+                    logger.warning('deferred_summary_refresh_failed', exc_info=True)
 
         if cache_hit:
             active_conversation_cache.update_message(conversation.id, user_message.id, user_message.role, user_message.content)

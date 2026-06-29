@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -70,7 +71,7 @@ def _build_summary_prompt(existing_summary: str | None, messages_to_cover: list[
 def maybe_refresh_conversation_summary(
     db: Session,
     conversation_id: int,
-    raw_messages: list[Message],
+    raw_messages: list[Message | dict[str, Any]],
     provider_name: str,
     preferences: object | None,
     model_name: str | None,
