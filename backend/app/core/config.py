@@ -35,6 +35,7 @@ class Settings:
     history_recent_tokens_cap: int = int(os.getenv('HISTORY_RECENT_TOKENS_CAP', '480'))
     history_message_char_cap: int = int(os.getenv('HISTORY_MESSAGE_CHAR_CAP', '280'))
     history_response_token_cap: int = int(os.getenv('HISTORY_RESPONSE_TOKEN_CAP', '320'))
+    history_include_assistant_messages: bool = _parse_bool(os.getenv('HISTORY_INCLUDE_ASSISTANT_MESSAGES'), False)
     enable_conversation_summary: bool = _parse_bool(os.getenv('ENABLE_CONVERSATION_SUMMARY'), True)
     summary_in_request_path: bool = _parse_bool(os.getenv('SUMMARY_IN_REQUEST_PATH'), False)
     image_token_cost: int = int(os.getenv('IMAGE_TOKEN_COST', '256'))

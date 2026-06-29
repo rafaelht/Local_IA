@@ -222,6 +222,9 @@ def build_conversation_context_from_messages(
             max_message_chars = max(0, settings.history_message_char_cap)
 
             for message in reversed(candidate_messages[:-1]):
+                if not settings.history_include_assistant_messages and message['role'] == 'assistant':
+                    continue
+
                 if max_additional_messages > 0 and additional_messages >= max_additional_messages:
                     break
 
