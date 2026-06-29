@@ -11,6 +11,12 @@ services:
       # N100/8GB performance profile (history on, low TTFT focus)
       - MODEL_CONTEXT_LIMIT=4096
       - RESPONSE_TOKEN_RESERVE=512
+      - LITERT_SDK_ENABLED=true
+      - LITERT_SDK_MODEL_PATH=/models/gemma-4-E2B-it.litertlm
+      - LITERT_SDK_CACHE_DIR=/app/.litert-cache
+      - LITERT_SDK_FALLBACK_TO_HTTP=true
+      - LITERT_SDK_MAX_ACTIVE_CONVERSATIONS=64
+      - LITERT_SDK_CONVERSATION_TIMEOUT_SECONDS=1800
       - ENABLE_DYNAMIC_HISTORY_BUDGET=true
       - HISTORY_MAX_PROMPT_TOKENS=2048
       - HISTORY_RECENT_MESSAGES_CAP=20
@@ -27,6 +33,7 @@ services:
     volumes:
       - ./backend:/app
       - ./backend/export:/app/export
+      - /volume2/docker/litertlm/litert-home/models:/models:ro
 
   frontend:
     build: ./frontend

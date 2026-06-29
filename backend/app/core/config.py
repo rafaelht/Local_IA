@@ -47,6 +47,19 @@ class Settings:
     model_request_timeout: int = int(os.getenv('MODEL_REQUEST_TIMEOUT', '120'))
     system_prompt: str | None = os.getenv('SYSTEM_PROMPT')
 
+    # LiteRT-LM SDK integration (stateful conversations + KV cache reuse)
+    litert_sdk_enabled: bool = _parse_bool(os.getenv('LITERT_SDK_ENABLED'), False)
+    litert_sdk_model_path: str = os.getenv('LITERT_SDK_MODEL_PATH', '')
+    litert_sdk_cache_dir: str = os.getenv('LITERT_SDK_CACHE_DIR', '')
+    litert_sdk_engine_max_tokens: int | None = (
+        int(os.getenv('LITERT_SDK_ENGINE_MAX_TOKENS'))
+        if os.getenv('LITERT_SDK_ENGINE_MAX_TOKENS')
+        else None
+    )
+    litert_sdk_fallback_to_http: bool = _parse_bool(os.getenv('LITERT_SDK_FALLBACK_TO_HTTP'), True)
+    litert_sdk_max_active_conversations: int = int(os.getenv('LITERT_SDK_MAX_ACTIVE_CONVERSATIONS', '64'))
+    litert_sdk_conversation_timeout_seconds: int = int(os.getenv('LITERT_SDK_CONVERSATION_TIMEOUT_SECONDS', '1800'))
+
     # CORS: comma-separated list of allowed origins.
     # Example: CORS_ORIGINS=https://chat.midominio.com,http://localhost:5173
     # Leave unset to allow all origins (development only).

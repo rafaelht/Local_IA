@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.models import Message
+from app.services.litert_conversation_manager import litert_conversation_manager
 
 
 SUPPORTED_PROVIDERS = {'liteRT', 'ollama'}
@@ -85,6 +86,9 @@ def _read_json_response(request: urllib.request.Request, timeout: int = 10) -> d
 
 
 def list_provider_models(provider: str, preferences: object | None = None) -> list[dict]:
+    if provider == 'liteRT' and settings.litert_sdk_enabled:
+        return litert_conversation_manager.list_models()
+
     base_url = get_provider_base_url(provider, preferences)
     models_url = urllib.parse.urljoin(base_url, '/v1/models')
     request = urllib.request.Request(models_url, method='GET')
@@ -124,6 +128,9 @@ def list_provider_models(provider: str, preferences: object | None = None) -> li
 
 
 def check_provider_health(provider: str, preferences: object | None = None) -> bool:
+    if provider == 'liteRT' and settings.litert_sdk_enabled:
+        return litert_conversation_manager.check_health()
+
     try:
         list_provider_models(provider, preferences)
         return True
@@ -147,6 +154,12 @@ def resolve_provider_model(
     model: str | None,
     preferences: object | None = None,
 ) -> str:
+    if provider == 'liteRT' and settings.litert_sdk_enabled:
+        sdk_model_path = settings.litert_sdk_model_path.strip()
+        if not sdk_model_path:
+            raise RuntimeError('LITERT_SDK_MODEL_PATH is required when LITERT_SDK_ENABLED=true')
+        return sdk_model_path
+
     normalized_model = normalize_model_name(model)
     if normalized_model is not None:
         return normalized_model

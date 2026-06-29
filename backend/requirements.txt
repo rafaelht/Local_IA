@@ -6,3 +6,4 @@ python-jose[cryptography]>=3.0.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-dotenv>=1.0.0
+litert-lm>=0.13.1

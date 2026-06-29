@@ -31,6 +31,7 @@ from app.services.conversation_cache import active_conversation_cache
 from app.services.conversation_summary import maybe_refresh_conversation_summary
 from app.services.conversation_summary import SummaryRefreshResult
 from app.services.conversation_summary import get_conversation_summary_state
+from app.services.litert_conversation_manager import litert_conversation_manager
 
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,8 @@ def delete_conversation(
     conversation = get_user_conversation(db, conversation_id, current_user.id)
     db.delete(conversation)
     db.commit()
+    active_conversation_cache.invalidate(conversation.id)
+    litert_conversation_manager.invalidate(conversation.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -149,6 +152,7 @@ def create_message(
     db.commit()
     db.refresh(message)
     active_conversation_cache.invalidate(conversation.id)
+    litert_conversation_manager.invalidate(conversation.id)
     return message
 
 
@@ -165,10 +169,12 @@ def chat(
 
     conversation = get_user_conversation(db, conversation_id, current_user.id)
 
-    # Convert content to JSON string if it's a list (for vision messages with images)
-    message_content = chat_request.content
-    if isinstance(message_content, list):
-        message_content = json.dumps(message_content, ensure_ascii=False)
+    user_request_content = chat_request.content
+
+    # Convert content to JSON string for DB persistence when it's multimodal input.
+    message_content = user_request_content
+    if isinstance(user_request_content, list):
+        message_content = json.dumps(user_request_content, ensure_ascii=False)
 
     user_message = Message(
         conversation_id=conversation.id,
@@ -211,86 +217,136 @@ def chat(
         ]
 
     history_enabled = chat_request.enable_context_history is not False
+    use_litert_sdk = provider_name == 'liteRT' and settings.litert_sdk_enabled
+
     if history_enabled and settings.history_response_token_cap > 0:
         response_token_reserve = min(response_token_reserve, settings.history_response_token_cap)
 
-    if history_enabled and settings.enable_conversation_summary:
-        summary_threshold_reached = len(raw_messages) >= settings.summary_trigger_messages
-        if settings.summary_in_request_path:
-            if summary_threshold_reached:
-                summary_result = maybe_refresh_conversation_summary(
-                    db,
-                    conversation.id,
-                    raw_messages,
-                    provider_name,
-                    current_user.preferences,
-                    model_name,
-                    temperature,
-                )
+    def prepare_http_inference_state() -> tuple[SummaryRefreshResult, object, dict]:
+        if history_enabled and settings.enable_conversation_summary:
+            summary_threshold_reached = len(raw_messages) >= settings.summary_trigger_messages
+            if settings.summary_in_request_path:
+                if summary_threshold_reached:
+                    summary_result_local = maybe_refresh_conversation_summary(
+                        db,
+                        conversation.id,
+                        raw_messages,
+                        provider_name,
+                        current_user.preferences,
+                        model_name,
+                        temperature,
+                    )
+                else:
+                    summary_result_local = SummaryRefreshResult(
+                        summary_text=None,
+                        covered_until_message_id=None,
+                        summary_generation_ms=0,
+                        summary_used=False,
+                    )
             else:
-                summary_result = SummaryRefreshResult(
-                    summary_text=None,
-                    covered_until_message_id=None,
-                    summary_generation_ms=0,
-                    summary_used=False,
-                )
+                if summary_threshold_reached:
+                    summary_result_local = get_conversation_summary_state(db, conversation.id)
+                else:
+                    summary_result_local = SummaryRefreshResult(
+                        summary_text=None,
+                        covered_until_message_id=None,
+                        summary_generation_ms=0,
+                        summary_used=False,
+                    )
         else:
-            if summary_threshold_reached:
-                summary_result = get_conversation_summary_state(db, conversation.id)
-            else:
-                summary_result = SummaryRefreshResult(
-                    summary_text=None,
-                    covered_until_message_id=None,
-                    summary_generation_ms=0,
-                    summary_used=False,
-                )
-    else:
+            summary_result_local = SummaryRefreshResult(
+                summary_text=None,
+                covered_until_message_id=None,
+                summary_generation_ms=0,
+                summary_used=False,
+            )
+
+        if cache_hit:
+            active_conversation_cache.update_summary(
+                conversation.id,
+                summary_result_local.summary_text,
+                summary_result_local.covered_until_message_id,
+            )
+
+        context_result_local = build_conversation_context_from_messages(
+            raw_messages,
+            settings.system_prompt,
+            response_token_reserve=response_token_reserve,
+            enable_context_history=history_enabled,
+            summary_text=summary_result_local.summary_text,
+            summary_covered_until_message_id=summary_result_local.covered_until_message_id,
+            db_query_ms=db_query_ms,
+        )
+
+        payload_local = build_model_payload(
+            provider_name,
+            resolved_model_name,
+            temperature,
+            response_token_reserve,
+            context_result_local.messages,
+        )
+        return summary_result_local, context_result_local, payload_local
+
+    if use_litert_sdk:
         summary_result = SummaryRefreshResult(
             summary_text=None,
             covered_until_message_id=None,
             summary_generation_ms=0,
             summary_used=False,
         )
-    if cache_hit:
-        active_conversation_cache.update_summary(
-            conversation.id,
-            summary_result.summary_text,
-            summary_result.covered_until_message_id,
-        )
+        context_result = None
+        payload = None
+    else:
+        summary_result, context_result, payload = prepare_http_inference_state()
 
-    context_result = build_conversation_context_from_messages(
-        raw_messages,
-        settings.system_prompt,
-        response_token_reserve=response_token_reserve,
-        enable_context_history=history_enabled,
-        summary_text=summary_result.summary_text,
-        summary_covered_until_message_id=summary_result.covered_until_message_id,
-        db_query_ms=db_query_ms,
-    )
-
-    payload = build_model_payload(provider_name, resolved_model_name, temperature, response_token_reserve, context_result.messages)
     assistant_parts: list[str] = []
-    metrics: dict[str, int | float | bool | None] = {
-        'db_write_ms': db_write_ms,
-        'db_query_ms': context_result.db_query_ms,
-        'context_build_ms': context_result.context_build_ms,
-        'token_count_ms': context_result.token_count_ms,
-        'model_call_ms': None,
-        'prefill_ms': None,
-        'ttft_ms': None,
-        'generation_tokens_per_sec': None,
-        'input_tokens': context_result.input_tokens,
-        'output_tokens': 0,
-        'selected_message_count': context_result.selected_message_count,
-        'context_budget_tokens': context_result.context_budget_tokens,
-        'response_token_reserve': context_result.response_token_reserve,
-        'history_enabled': context_result.history_enabled,
-        'summary_used': context_result.summary_used,
-        'summary_generation_ms': summary_result.summary_generation_ms,
-        'total_message_count': context_result.total_message_count,
-        'total_history_tokens': context_result.total_history_tokens,
-        'cache_hit': cache_hit,
-    }
+    if use_litert_sdk:
+        metrics: dict[str, int | float | bool | None] = {
+            'db_write_ms': db_write_ms,
+            'db_query_ms': db_query_ms,
+            'context_build_ms': 0,
+            'token_count_ms': 0,
+            'model_call_ms': None,
+            'prefill_ms': None,
+            'ttft_ms': None,
+            'generation_tokens_per_sec': None,
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'selected_message_count': len(raw_messages),
+            'context_budget_tokens': 0,
+            'response_token_reserve': response_token_reserve,
+            'history_enabled': history_enabled,
+            'summary_used': False,
+            'summary_generation_ms': 0,
+            'total_message_count': len(raw_messages),
+            'total_history_tokens': 0,
+            'cache_hit': cache_hit,
+            'litert_runtime_reused': None,
+            'litert_hydration_ms': None,
+            'litert_http_fallback': False,
+        }
+    else:
+        metrics = {
+            'db_write_ms': db_write_ms,
+            'db_query_ms': context_result.db_query_ms,
+            'context_build_ms': context_result.context_build_ms,
+            'token_count_ms': context_result.token_count_ms,
+            'model_call_ms': None,
+            'prefill_ms': None,
+            'ttft_ms': None,
+            'generation_tokens_per_sec': None,
+            'input_tokens': context_result.input_tokens,
+            'output_tokens': 0,
+            'selected_message_count': context_result.selected_message_count,
+            'context_budget_tokens': context_result.context_budget_tokens,
+            'response_token_reserve': context_result.response_token_reserve,
+            'history_enabled': context_result.history_enabled,
+            'summary_used': context_result.summary_used,
+            'summary_generation_ms': summary_result.summary_generation_ms,
+            'total_message_count': context_result.total_message_count,
+            'total_history_tokens': context_result.total_history_tokens,
+            'cache_hit': cache_hit,
+        }
 
     def event_stream() -> Generator[bytes, None, None]:
         model_call_started_at = time.perf_counter()
@@ -306,15 +362,77 @@ def chat(
                 metrics['ttft_ms'] = round((first_token_at - request_started_at) * 1000)
 
         try:
-            for chunk in stream_provider_response(
-                provider_name,
-                current_user.preferences,
-                payload,
-                assistant_parts,
-                on_first_token=mark_first_token,
-            ):
-                yield chunk
+            if use_litert_sdk:
+                stream_iter, sdk_metadata = litert_conversation_manager.stream_message(
+                    conversation_id=conversation.id,
+                    user_message_content=user_request_content if user_request_content is not None else message_content,
+                    history_messages=raw_messages,
+                    current_user_message_id=user_message.id,
+                    model_name=resolved_model_name,
+                    system_prompt=settings.system_prompt,
+                    temperature=temperature,
+                )
+                metrics['litert_runtime_reused'] = bool(sdk_metadata.get('reused_runtime'))
+                metrics['litert_hydration_ms'] = int(sdk_metadata.get('hydration_ms') or 0)
+                metrics['litert_active_conversations'] = int(sdk_metadata.get('active_conversations') or 0)
+
+                sdk_emitted_any = False
+                for text_chunk in stream_iter:
+                    if text_chunk and first_token_at is None:
+                        mark_first_token()
+                    assistant_parts.append(text_chunk)
+                    sdk_emitted_any = True
+                    chunk_payload = {
+                        'choices': [
+                            {
+                                'delta': {
+                                    'content': text_chunk,
+                                }
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(chunk_payload, ensure_ascii=False)}\n\n".encode('utf-8')
+
+                yield b'data: [DONE]\n\n'
+            else:
+                for chunk in stream_provider_response(
+                    provider_name,
+                    current_user.preferences,
+                    payload,
+                    assistant_parts,
+                    on_first_token=mark_first_token,
+                ):
+                    yield chunk
         except RuntimeError as exc:
+            if use_litert_sdk and settings.litert_sdk_fallback_to_http and not assistant_parts:
+                litert_conversation_manager.mark_http_fallback()
+                metrics['litert_http_fallback'] = True
+
+                summary_result_http, context_result_http, payload_http = prepare_http_inference_state()
+                metrics['db_query_ms'] = context_result_http.db_query_ms
+                metrics['context_build_ms'] = context_result_http.context_build_ms
+                metrics['token_count_ms'] = context_result_http.token_count_ms
+                metrics['input_tokens'] = context_result_http.input_tokens
+                metrics['selected_message_count'] = context_result_http.selected_message_count
+                metrics['context_budget_tokens'] = context_result_http.context_budget_tokens
+                metrics['response_token_reserve'] = context_result_http.response_token_reserve
+                metrics['history_enabled'] = context_result_http.history_enabled
+                metrics['summary_used'] = context_result_http.summary_used
+                metrics['summary_generation_ms'] = summary_result_http.summary_generation_ms
+                metrics['total_message_count'] = context_result_http.total_message_count
+                metrics['total_history_tokens'] = context_result_http.total_history_tokens
+                yield build_metrics_event('context_ready', metrics)
+
+                for chunk in stream_provider_response(
+                    provider_name,
+                    current_user.preferences,
+                    payload_http,
+                    assistant_parts,
+                    on_first_token=mark_first_token,
+                ):
+                    yield chunk
+                return
+
             error_text = f'Error del proveedor: {exc}'
             assistant_parts.append(error_text)
             error_payload = {
@@ -345,7 +463,12 @@ def chat(
             conversation.updated_at = datetime.utcnow()
             db.commit()
 
-            if history_enabled and settings.enable_conversation_summary and not settings.summary_in_request_path:
+            if (
+                not use_litert_sdk
+                and history_enabled
+                and settings.enable_conversation_summary
+                and not settings.summary_in_request_path
+            ):
                 summary_source_messages = [*raw_messages, {
                     'id': saved_assistant.id,
                     'role': saved_assistant.role,
@@ -425,4 +548,5 @@ def delete_message(
     db.delete(message)
     db.commit()
     active_conversation_cache.remove_message(conversation.id, message.id)
+    litert_conversation_manager.invalidate(conversation.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

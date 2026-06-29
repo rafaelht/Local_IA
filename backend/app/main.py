@@ -12,6 +12,7 @@ from app.api.v1.routes.users import router as users_router
 
 from app.db.base import Base
 from app.db.session import engine
+from app.services.litert_conversation_manager import litert_conversation_manager
 from sqlalchemy import inspect, text
 
 
@@ -45,8 +46,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown (si algún día necesitas cerrar cosas)
-    # print("Shutting down...")
-    # print("Shutting down...")
+    litert_conversation_manager.shutdown()
 
 
 app = FastAPI(
