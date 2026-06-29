@@ -3,6 +3,12 @@ import os
 from fastapi.security import OAuth2PasswordBearer
 
 
+def _parse_bool(raw: str, default: bool) -> bool:
+    if raw is None:
+        return default
+    return raw.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 def _parse_cors_origins(raw: str) -> list[str]:
     """Parse comma-separated CORS origins from env var."""
     return [o.strip().rstrip('/') for o in raw.split(',') if o.strip()]
@@ -23,11 +29,15 @@ class Settings:
     context_token_budget: int = int(os.getenv('CONTEXT_TOKEN_BUDGET', '0'))
     response_token_reserve: int = int(os.getenv('RESPONSE_TOKEN_RESERVE', '1024'))
     minimum_context_budget: int = int(os.getenv('MINIMUM_CONTEXT_BUDGET', '256'))
+    enable_dynamic_history_budget: bool = _parse_bool(os.getenv('ENABLE_DYNAMIC_HISTORY_BUDGET'), True)
+    history_max_prompt_tokens: int = int(os.getenv('HISTORY_MAX_PROMPT_TOKENS', '1536'))
+    history_recent_messages_cap: int = int(os.getenv('HISTORY_RECENT_MESSAGES_CAP', '6'))
+    history_recent_tokens_cap: int = int(os.getenv('HISTORY_RECENT_TOKENS_CAP', '1024'))
     image_token_cost: int = int(os.getenv('IMAGE_TOKEN_COST', '256'))
-    summary_trigger_messages: int = int(os.getenv('SUMMARY_TRIGGER_MESSAGES', '40'))
-    summary_trigger_tokens: int = int(os.getenv('SUMMARY_TRIGGER_TOKENS', '6000'))
-    summary_keep_recent_messages: int = int(os.getenv('SUMMARY_KEEP_RECENT_MESSAGES', '8'))
-    summary_response_tokens: int = int(os.getenv('SUMMARY_RESPONSE_TOKENS', '256'))
+    summary_trigger_messages: int = int(os.getenv('SUMMARY_TRIGGER_MESSAGES', '8'))
+    summary_trigger_tokens: int = int(os.getenv('SUMMARY_TRIGGER_TOKENS', '1400'))
+    summary_keep_recent_messages: int = int(os.getenv('SUMMARY_KEEP_RECENT_MESSAGES', '4'))
+    summary_response_tokens: int = int(os.getenv('SUMMARY_RESPONSE_TOKENS', '160'))
     active_conversation_cache_size: int = int(os.getenv('ACTIVE_CONVERSATION_CACHE_SIZE', '128'))
     model_request_timeout: int = int(os.getenv('MODEL_REQUEST_TIMEOUT', '120'))
     system_prompt: str | None = os.getenv('SYSTEM_PROMPT')

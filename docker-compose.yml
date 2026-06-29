@@ -8,6 +8,17 @@ services:
       - SECRET_KEY=supersecretchangeme
       - ACCESS_TOKEN_EXPIRE_MINUTES=60
       - CORS_ORIGINS=https://liteia.rafaeldevs.lat,http://10.0.0.84:5173,http://home-nas.local:5173
+      # N100/8GB performance profile (history on, low TTFT focus)
+      - MODEL_CONTEXT_LIMIT=4096
+      - RESPONSE_TOKEN_RESERVE=512
+      - ENABLE_DYNAMIC_HISTORY_BUDGET=true
+      - HISTORY_MAX_PROMPT_TOKENS=1024
+      - HISTORY_RECENT_MESSAGES_CAP=4
+      - HISTORY_RECENT_TOKENS_CAP=640
+      - SUMMARY_TRIGGER_MESSAGES=6
+      - SUMMARY_TRIGGER_TOKENS=900
+      - SUMMARY_KEEP_RECENT_MESSAGES=3
+      - SUMMARY_RESPONSE_TOKENS=128
     volumes:
       - ./backend:/app
       - ./backend/export:/app/export

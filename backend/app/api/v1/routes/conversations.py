@@ -29,6 +29,7 @@ from app.services.chat import (
 from app.services.conversation_context import build_conversation_context_from_messages, estimate_text_tokens, load_messages_for_context
 from app.services.conversation_cache import active_conversation_cache
 from app.services.conversation_summary import maybe_refresh_conversation_summary
+from app.services.conversation_summary import SummaryRefreshResult
 
 
 logger = logging.getLogger(__name__)
@@ -208,15 +209,25 @@ def chat(
             },
         ]
 
-    summary_result = maybe_refresh_conversation_summary(
-        db,
-        conversation.id,
-        raw_messages,
-        provider_name,
-        current_user.preferences,
-        model_name,
-        temperature,
-    )
+    history_enabled = chat_request.enable_context_history is not False
+
+    if history_enabled:
+        summary_result = maybe_refresh_conversation_summary(
+            db,
+            conversation.id,
+            raw_messages,
+            provider_name,
+            current_user.preferences,
+            model_name,
+            temperature,
+        )
+    else:
+        summary_result = SummaryRefreshResult(
+            summary_text=None,
+            covered_until_message_id=None,
+            summary_generation_ms=0,
+            summary_used=False,
+        )
     if cache_hit:
         active_conversation_cache.update_summary(
             conversation.id,
@@ -228,7 +239,7 @@ def chat(
         raw_messages,
         settings.system_prompt,
         response_token_reserve=response_token_reserve,
-        enable_context_history=chat_request.enable_context_history is not False,
+        enable_context_history=history_enabled,
         summary_text=summary_result.summary_text,
         summary_covered_until_message_id=summary_result.covered_until_message_id,
         db_query_ms=db_query_ms,

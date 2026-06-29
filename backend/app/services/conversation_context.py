@@ -85,6 +85,17 @@ def load_messages_for_context(db: Session, conversation_id: int) -> tuple[list[M
     return messages, elapsed_ms
 
 
+def _compute_context_budget(response_token_reserve: int, enable_context_history: bool) -> int:
+    derived_budget = settings.model_context_limit - response_token_reserve
+    configured_budget = settings.context_token_budget if settings.context_token_budget > 0 else derived_budget
+    budget = max(settings.minimum_context_budget, min(configured_budget, derived_budget))
+
+    if enable_context_history and settings.enable_dynamic_history_budget and settings.history_max_prompt_tokens > 0:
+        budget = min(budget, settings.history_max_prompt_tokens)
+
+    return budget
+
+
 def normalize_messages(raw_messages: list[Message | dict[str, Any]]) -> tuple[list[dict[str, Any]], int, int]:
     token_started_at = time.perf_counter()
     normalized_messages: list[dict[str, Any]] = []
@@ -128,9 +139,7 @@ def build_conversation_context_from_messages(
     normalized_messages, total_history_tokens, token_count_ms = normalize_messages(raw_messages)
 
     context_started_at = time.perf_counter()
-    derived_budget = settings.model_context_limit - response_token_reserve
-    configured_budget = settings.context_token_budget if settings.context_token_budget > 0 else derived_budget
-    context_budget_tokens = max(settings.minimum_context_budget, min(configured_budget, derived_budget))
+    context_budget_tokens = _compute_context_budget(response_token_reserve, enable_context_history)
 
     messages_for_model: list[dict[str, Any]] = []
     consumed_tokens = 0
@@ -160,14 +169,34 @@ def build_conversation_context_from_messages(
     selected_messages: list[dict[str, Any]] = []
     if candidate_messages:
         latest_message = candidate_messages[-1]
-        selected_messages.append({
-            'role': latest_message['role'],
-            'content': latest_message['content'],
-        })
-        consumed_tokens += latest_message['tokens']
+        latest_tokens = latest_message['tokens']
+        if consumed_tokens + latest_tokens <= context_budget_tokens:
+            selected_messages.append({
+                'role': latest_message['role'],
+                'content': latest_message['content'],
+            })
+            consumed_tokens += latest_tokens
+        else:
+            selected_messages.append({
+                'role': latest_message['role'],
+                'content': latest_message['content'],
+            })
+            consumed_tokens = context_budget_tokens
 
         if enable_context_history:
+            additional_messages = 0
+            additional_tokens = 0
+            max_additional_messages = max(0, settings.history_recent_messages_cap)
+            max_additional_tokens = max(0, settings.history_recent_tokens_cap)
+
             for message in reversed(candidate_messages[:-1]):
+                if max_additional_messages > 0 and additional_messages >= max_additional_messages:
+                    break
+
+                projected_additional_tokens = additional_tokens + message['tokens']
+                if max_additional_tokens > 0 and projected_additional_tokens > max_additional_tokens:
+                    break
+
                 projected_tokens = consumed_tokens + message['tokens']
                 if projected_tokens > context_budget_tokens:
                     break
@@ -177,6 +206,8 @@ def build_conversation_context_from_messages(
                     'content': message['content'],
                 })
                 consumed_tokens = projected_tokens
+                additional_messages += 1
+                additional_tokens = projected_additional_tokens
 
     messages_for_model.extend(selected_messages)
     context_build_ms = round((time.perf_counter() - context_started_at) * 1000)
