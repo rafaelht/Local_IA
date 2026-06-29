@@ -403,7 +403,7 @@ def chat(
                     on_first_token=mark_first_token,
                 ):
                     yield chunk
-        except RuntimeError as exc:
+        except Exception as exc:
             if use_litert_sdk and settings.litert_sdk_fallback_to_http and not assistant_parts:
                 litert_conversation_manager.mark_http_fallback()
                 metrics['litert_http_fallback'] = True
