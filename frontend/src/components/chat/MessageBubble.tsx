@@ -33,7 +33,7 @@ function MessageBubbleInner({ role, content, isStreaming = false }: MessageBubbl
           >
             {isUser ? 'Tú' : isStreaming ? 'Asistente (Generando...)' : 'Asistente'}
           </p>
-          {!isUser && !isStreaming && content.trim().length > 0 && (
+          {!isStreaming && content.trim().length > 0 && (
             <CopyButton
               getText={getCopyText}
               label="Copiar"

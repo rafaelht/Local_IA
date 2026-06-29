@@ -39,10 +39,12 @@ export default function SettingsPage() {
     setDefaultModel,
   } = useAppStore()
 
-  const { models, selectedProvider, selectedModel, setProvider, setSelectedModel } = useProviderStore()
+  const { models, selectedProvider, selectedModel, setProvider, setSelectedModel, fetchModelsAndCheckHealth } = useProviderStore()
 
   const [favoriteProvider, setFavoriteProvider] = useState<ProviderName>('liteRT')
   const [favoriteModelName, setFavoriteModelName] = useState('')
+  const [ollamaApiUrl, setOllamaApiUrl] = useState('')
+  const [litertApiUrl, setLitertApiUrl] = useState('')
   const [saveMessage, setSaveMessage] = useState<string | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
   const [users, setUsers] = useState<Array<{ id: number; email: string; nickname?: string; full_name?: string; role: string; is_active: boolean }>>([])
@@ -65,6 +67,8 @@ export default function SettingsPage() {
       setContextLength(preferences.context_length)
       setDefaultProvider(preferences.default_provider)
       setDefaultModel(preferences.default_model)
+      setOllamaApiUrl(preferences.ollama_api_url)
+      setLitertApiUrl(preferences.litert_api_url)
     }
   }, [preferences, setTheme, setDevMode, setTemperature, setContextLength, setDefaultProvider, setDefaultModel])
 
@@ -101,11 +105,43 @@ export default function SettingsPage() {
       setContextLength(updated.context_length)
       setDefaultProvider(updated.default_provider)
       setDefaultModel(updated.default_model)
+      setOllamaApiUrl(updated.ollama_api_url)
+      setLitertApiUrl(updated.litert_api_url)
       setSaveMessage('Preferencias guardadas')
       window.setTimeout(() => setSaveMessage(null), 2000)
     } catch (err) {
       console.error('Error al guardar preferencias:', err)
       setSaveMessage('Error al guardar')
+      window.setTimeout(() => setSaveMessage(null), 2500)
+    }
+  }
+
+  const handleSaveProviderUrls = async () => {
+    if (!ollamaApiUrl.trim() || !litertApiUrl.trim()) {
+      setSaveMessage('Completa ambas URLs')
+      window.setTimeout(() => setSaveMessage(null), 2500)
+      return
+    }
+
+    try {
+      const updated = await updatePreferences.mutateAsync({
+        ollama_api_url: ollamaApiUrl.trim(),
+        litert_api_url: litertApiUrl.trim(),
+      })
+      setTheme(updated.theme)
+      setDevMode(updated.dev_mode)
+      setTemperature(updated.temperature)
+      setContextLength(updated.context_length)
+      setDefaultProvider(updated.default_provider)
+      setDefaultModel(updated.default_model)
+      setOllamaApiUrl(updated.ollama_api_url)
+      setLitertApiUrl(updated.litert_api_url)
+      await fetchModelsAndCheckHealth()
+      setSaveMessage('URLs actualizadas')
+      window.setTimeout(() => setSaveMessage(null), 2000)
+    } catch (err) {
+      console.error('Error al actualizar URLs de proveedores:', err)
+      setSaveMessage('Error al actualizar URLs')
       window.setTimeout(() => setSaveMessage(null), 2500)
     }
   }
@@ -374,6 +410,50 @@ export default function SettingsPage() {
         <div>
           <h2 className="text-lg font-bold text-white">Proveedor y modelo por defecto</h2>
           <p className="mt-1 text-sm text-slate-400">Se aplicará al iniciar sesión y al abrir el chat.</p>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <div>
+            <label className="mb-2 block text-sm text-slate-300" htmlFor="litert-api-url">
+              URL LiteRT-LM / llama.cpp / OpenAI compatible
+            </label>
+            <input
+              id="litert-api-url"
+              type="url"
+              value={litertApiUrl}
+              onChange={(e) => setLitertApiUrl(e.target.value)}
+              placeholder="http://localhost:8080"
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400"
+            />
+          </div>
+
+          <div>
+            <label className="mb-2 block text-sm text-slate-300" htmlFor="ollama-api-url">
+              URL Ollama
+            </label>
+            <input
+              id="ollama-api-url"
+              type="url"
+              value={ollamaApiUrl}
+              onChange={(e) => setOllamaApiUrl(e.target.value)}
+              placeholder="http://localhost:11434"
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400"
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-sm text-slate-400">
+          <p>
+            Usa endpoints con API compatible con OpenAI para LiteRT-LM, llama.cpp y servidores similares.
+          </p>
+          <button
+            type="button"
+            onClick={handleSaveProviderUrls}
+            disabled={updatePreferences.isPending}
+            className="rounded-xl bg-cyan-500 px-4 py-2 text-sm font-bold text-slate-950 transition hover:bg-cyan-400 disabled:opacity-50"
+          >
+            Guardar URLs
+          </button>
         </div>
 
         <div className="grid grid-cols-2 gap-3">

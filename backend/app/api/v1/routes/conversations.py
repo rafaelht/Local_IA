@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Generator, Optional
 import json
+import logging
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
@@ -19,15 +21,27 @@ from app.schemas.conversation import (
     MessageRead,
 )
 from app.services.chat import (
-    build_chat_history,
-    get_provider_url,
-    get_recent_messages,
     build_model_payload,
     stream_provider_response,
     save_assistant_message,
 )
+from app.services.conversation_context import build_conversation_context_from_messages, estimate_text_tokens, load_messages_for_context
+from app.services.conversation_cache import active_conversation_cache
+from app.services.conversation_summary import maybe_refresh_conversation_summary
+
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def build_metrics_event(phase: str, metrics: dict[str, int | float | bool | None]) -> bytes:
+    payload = {
+        'type': 'metrics',
+        'phase': phase,
+        'metrics': metrics,
+    }
+    return f"event: metrics\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode('utf-8')
 
 
 def get_user_conversation(db: Session, conversation_id: int, user_id: int) -> Conversation:
@@ -131,6 +145,7 @@ def create_message(
     conversation.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(message)
+    active_conversation_cache.invalidate(conversation.id)
     return message
 
 
@@ -141,6 +156,7 @@ def chat(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
+    request_started_at = time.perf_counter()
     if chat_request.role != 'user':
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Only user messages are supported for chat')
 
@@ -156,41 +172,179 @@ def chat(
         role='user',
         content=message_content,
     )
+    db_write_started_at = time.perf_counter()
     db.add(user_message)
     conversation.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(user_message)
-
-    max_context_messages = chat_request.max_context_messages or settings.max_context_messages
-    
-    # If context history is disabled, only get the current message (no previous context)
-    if chat_request.enable_context_history is False:
-        max_context_messages = 1
-    else:
-        # Limit to 15 messages when context history is enabled
-        max_context_messages = min(max_context_messages, 15)
-    
-    recent_messages = get_recent_messages(db, conversation.id, max_context_messages)
-    messages = build_chat_history(recent_messages, settings.system_prompt)
+    db_write_ms = round((time.perf_counter() - db_write_started_at) * 1000)
 
     provider_name = chat_request.provider or getattr(current_user.preferences, 'default_provider', 'liteRT')
     model_name = chat_request.model or getattr(current_user.preferences, 'default_model', None)
     temperature = chat_request.temperature if chat_request.temperature is not None else getattr(current_user.preferences, 'temperature', 0.7)
-    max_tokens = chat_request.max_tokens if chat_request.max_tokens is not None else getattr(current_user.preferences, 'context_length', None)
+    response_token_reserve = chat_request.max_tokens if chat_request.max_tokens is not None else getattr(current_user.preferences, 'context_length', settings.response_token_reserve)
 
-    payload = build_model_payload(provider_name, model_name, temperature, max_tokens, messages)
-    provider_url = get_provider_url(provider_name)
+    cache_hit = False
+    cached_state = active_conversation_cache.get(conversation.id)
+    if cached_state is not None:
+        raw_messages = cached_state.messages
+        db_query_ms = 0
+        cache_hit = True
+    else:
+        raw_messages, db_query_ms = load_messages_for_context(db, conversation.id)
+
+    if cache_hit:
+        raw_messages = [
+            *raw_messages,
+            {
+                'id': user_message.id,
+                'role': user_message.role,
+                'content': user_message.content,
+            },
+        ]
+
+    summary_result = maybe_refresh_conversation_summary(
+        db,
+        conversation.id,
+        raw_messages,
+        provider_name,
+        current_user.preferences,
+        model_name,
+        temperature,
+    )
+    if cache_hit:
+        active_conversation_cache.update_summary(
+            conversation.id,
+            summary_result.summary_text,
+            summary_result.covered_until_message_id,
+        )
+
+    context_result = build_conversation_context_from_messages(
+        raw_messages,
+        settings.system_prompt,
+        response_token_reserve=response_token_reserve,
+        enable_context_history=chat_request.enable_context_history is not False,
+        summary_text=summary_result.summary_text,
+        summary_covered_until_message_id=summary_result.covered_until_message_id,
+        db_query_ms=db_query_ms,
+    )
+
+    payload = build_model_payload(provider_name, model_name, temperature, response_token_reserve, context_result.messages)
     assistant_parts: list[str] = []
+    metrics: dict[str, int | float | bool | None] = {
+        'db_write_ms': db_write_ms,
+        'db_query_ms': context_result.db_query_ms,
+        'context_build_ms': context_result.context_build_ms,
+        'token_count_ms': context_result.token_count_ms,
+        'model_call_ms': None,
+        'prefill_ms': None,
+        'ttft_ms': None,
+        'generation_tokens_per_sec': None,
+        'input_tokens': context_result.input_tokens,
+        'output_tokens': 0,
+        'selected_message_count': context_result.selected_message_count,
+        'context_budget_tokens': context_result.context_budget_tokens,
+        'response_token_reserve': context_result.response_token_reserve,
+        'history_enabled': context_result.history_enabled,
+        'summary_used': context_result.summary_used,
+        'summary_generation_ms': summary_result.summary_generation_ms,
+        'total_message_count': context_result.total_message_count,
+        'total_history_tokens': context_result.total_history_tokens,
+        'cache_hit': cache_hit,
+    }
 
     def event_stream() -> Generator[bytes, None, None]:
-        for chunk in stream_provider_response(provider_url, payload, assistant_parts):
-            yield chunk
+        model_call_started_at = time.perf_counter()
+        first_token_at: float | None = None
+
+        yield build_metrics_event('context_ready', metrics)
+
+        def mark_first_token() -> None:
+            nonlocal first_token_at
+            if first_token_at is None:
+                first_token_at = time.perf_counter()
+                metrics['prefill_ms'] = round((first_token_at - model_call_started_at) * 1000)
+                metrics['ttft_ms'] = round((first_token_at - request_started_at) * 1000)
+
+        try:
+            for chunk in stream_provider_response(
+                provider_name,
+                current_user.preferences,
+                payload,
+                assistant_parts,
+                on_first_token=mark_first_token,
+            ):
+                yield chunk
+        except RuntimeError as exc:
+            error_text = f'Error del proveedor: {exc}'
+            assistant_parts.append(error_text)
+            error_payload = {
+                'choices': [
+                    {
+                        'delta': {
+                            'content': error_text,
+                        }
+                    }
+                ]
+            }
+            yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n".encode('utf-8')
+            yield b'data: [DONE]\n\n'
+        finally:
+            model_call_finished_at = time.perf_counter()
+            metrics['model_call_ms'] = round((model_call_finished_at - model_call_started_at) * 1000)
+            output_text = ''.join(assistant_parts)
+            output_tokens = estimate_text_tokens(output_text)
+            metrics['output_tokens'] = output_tokens
+            if first_token_at is not None:
+                generation_window_ms = max(1, round((model_call_finished_at - first_token_at) * 1000))
+                metrics['generation_tokens_per_sec'] = round(output_tokens / (generation_window_ms / 1000), 2)
 
         assistant_text = ''.join(assistant_parts).strip()
+        saved_assistant = None
         if assistant_text:
-            save_assistant_message(db, conversation.id, assistant_text)
+            saved_assistant = save_assistant_message(db, conversation.id, assistant_text)
             conversation.updated_at = datetime.utcnow()
             db.commit()
+
+        if cache_hit:
+            active_conversation_cache.update_message(conversation.id, user_message.id, user_message.role, user_message.content)
+            if saved_assistant is not None:
+                active_conversation_cache.update_message(
+                    conversation.id,
+                    saved_assistant.id,
+                    saved_assistant.role,
+                    saved_assistant.content,
+                )
+        else:
+            cache_messages = list(raw_messages)
+            if saved_assistant is not None:
+                cache_messages.append(
+                    {
+                        'id': saved_assistant.id,
+                        'role': saved_assistant.role,
+                        'content': saved_assistant.content,
+                    }
+                )
+            active_conversation_cache.set(
+                conversation.id,
+                cache_messages,
+                summary_text=summary_result.summary_text,
+                summary_covered_until_message_id=summary_result.covered_until_message_id,
+            )
+
+        logger.info(
+            'chat_metrics %s',
+            json.dumps(
+                {
+                    'conversation_id': conversation.id,
+                    'provider': provider_name,
+                    'model': model_name,
+                    **metrics,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        yield build_metrics_event('completed', metrics)
 
     return StreamingResponse(event_stream(), media_type='text/event-stream')
 
@@ -212,4 +366,5 @@ def delete_message(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Mensaje no encontrado')
     db.delete(message)
     db.commit()
+    active_conversation_cache.remove_message(conversation.id, message.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

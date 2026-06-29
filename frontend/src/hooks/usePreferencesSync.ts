@@ -10,6 +10,8 @@ export function usePreferencesSync() {
   const markPreferencesLoaded = useAppStore((state) => state.markPreferencesLoaded)
   const setProvider = useProviderStore((state) => state.setProvider)
   const setSelectedModel = useProviderStore((state) => state.setSelectedModel)
+  const selectedProvider = useProviderStore((state) => state.selectedProvider)
+  const selectedModel = useProviderStore((state) => state.selectedModel)
 
   const { data: preferences, isSuccess } = usePreferences()
 
@@ -21,8 +23,10 @@ export function usePreferencesSync() {
 
     if (isSuccess && preferences) {
       hydrateFromPreferences(preferences)
-      setProvider(preferences.default_provider)
-      if (preferences.default_model) {
+      if (selectedProvider !== preferences.default_provider) {
+        setProvider(preferences.default_provider)
+      }
+      if (preferences.default_model !== selectedModel) {
         setSelectedModel(preferences.default_model)
       }
     }
@@ -32,6 +36,8 @@ export function usePreferencesSync() {
     preferences,
     hydrateFromPreferences,
     markPreferencesLoaded,
+    selectedProvider,
+    selectedModel,
     setProvider,
     setSelectedModel,
   ])

@@ -1,4 +1,5 @@
 import axios from 'axios'
+import api from '../lib/api'
 import type { ChatAttachment, ModelInfo, ProviderClient } from './provider'
 
 function buildMessages(prompt: string, options?: Record<string, unknown>) {
@@ -37,8 +38,8 @@ export class OllamaProvider implements ProviderClient {
 
   async health(): Promise<boolean> {
     try {
-      const response = await axios.get(`${this.baseUrl}/v1/models`, { timeout: 3000 })
-      return response.status === 200
+      const response = await api.get('/api/v1/preferences/providers/ollama/health')
+      return response.data.healthy === true
     } catch {
       return false
     }
@@ -46,7 +47,7 @@ export class OllamaProvider implements ProviderClient {
 
   async listModels(): Promise<ModelInfo[]> {
     try {
-      const response = await axios.get(`${this.baseUrl}/v1/models`)
+      const response = await api.get('/api/v1/preferences/providers/ollama/models')
       const models = response.data.data || []
       return models.map((m: any) => ({
         id: m.id,

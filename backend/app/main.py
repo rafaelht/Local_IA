@@ -12,6 +12,21 @@ from app.api.v1.routes.users import router as users_router
 
 from app.db.base import Base
 from app.db.session import engine
+from sqlalchemy import inspect, text
+
+
+def ensure_schema_compatibility() -> None:
+    inspector = inspect(engine)
+    columns = {column['name'] for column in inspector.get_columns('user_preferences')}
+    missing_columns = {
+        'ollama_api_url': 'ALTER TABLE user_preferences ADD COLUMN ollama_api_url VARCHAR(512)',
+        'litert_api_url': 'ALTER TABLE user_preferences ADD COLUMN litert_api_url VARCHAR(512)',
+    }
+
+    with engine.begin() as connection:
+        for column_name, ddl in missing_columns.items():
+            if column_name not in columns:
+                connection.execute(text(ddl))
 
 
 # -----------------------------
@@ -21,6 +36,7 @@ from app.db.session import engine
 async def lifespan(app: FastAPI):
     # Startup
     Base.metadata.create_all(bind=engine)
+    ensure_schema_compatibility()
 
     # Seed initial admin user
     from app.db.seed import create_initial_admin

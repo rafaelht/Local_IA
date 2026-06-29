@@ -1,4 +1,5 @@
 import axios from 'axios'
+import api from '../lib/api'
 import type { ChatAttachment, ModelInfo, ProviderClient } from './provider'
 
 function buildMessages(prompt: string, options?: Record<string, unknown>) {
@@ -37,8 +38,8 @@ export class LiteRTProvider implements ProviderClient {
 
   async health(): Promise<boolean> {
     try {
-      const response = await axios.get(`${this.baseUrl}/v1/models`, { timeout: 3000 })
-      return response.status === 200
+      const response = await api.get('/api/v1/preferences/providers/liteRT/health')
+      return response.data.healthy === true
     } catch {
       return false
     }
@@ -46,12 +47,12 @@ export class LiteRTProvider implements ProviderClient {
 
   async listModels(): Promise<ModelInfo[]> {
     try {
-      const response = await axios.get(`${this.baseUrl}/v1/models`)
+      const response = await api.get('/api/v1/preferences/providers/liteRT/models')
       const models = response.data.data || []
       return models.map((m: any) => ({
         id: m.id,
         name: m.id,
-        description: 'Modelo local en LiteRT-LM'
+        description: 'Modelo en endpoint compatible con LiteRT-LM / OpenAI'
       }))
     } catch (error) {
       console.error('Error al listar modelos de LiteRT:', error)

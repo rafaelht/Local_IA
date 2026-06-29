@@ -34,6 +34,7 @@ class Conversation(Base):
 
     owner = relationship('User', back_populates='conversations')
     messages = relationship('Message', back_populates='conversation', cascade='all, delete-orphan')
+    summary = relationship('ConversationSummary', back_populates='conversation', uselist=False, cascade='all, delete-orphan')
 
 
 class Message(Base):
@@ -48,6 +49,20 @@ class Message(Base):
     conversation = relationship('Conversation', back_populates='messages')
 
 
+class ConversationSummary(Base):
+    __tablename__ = 'conversation_summaries'
+
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, ForeignKey('conversations.id'), unique=True, nullable=False)
+    summary_text = Column(Text, nullable=False)
+    covered_until_message_id = Column(Integer, nullable=False)
+    source_message_count = Column(Integer, default=0, nullable=False)
+    source_token_count = Column(Integer, default=0, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    conversation = relationship('Conversation', back_populates='summary')
+
+
 class UserPreference(Base):
     __tablename__ = 'user_preferences'
 
@@ -57,6 +72,8 @@ class UserPreference(Base):
     dev_mode = Column(Boolean, default=False, nullable=False)
     default_provider = Column(String(50), default='liteRT', nullable=False)
     default_model = Column(String(255), nullable=True)
+    ollama_api_url = Column(String(512), nullable=True)
+    litert_api_url = Column(String(512), nullable=True)
     temperature = Column(Float, default=0.7, nullable=False)
     context_length = Column(Integer, default=2048, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

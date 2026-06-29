@@ -8,6 +8,8 @@ class UserPreferenceRead(BaseModel):
     dev_mode: bool
     default_provider: str
     default_model: Optional[str] = None
+    ollama_api_url: Optional[str] = None
+    litert_api_url: Optional[str] = None
     temperature: float
     context_length: int
 
@@ -19,6 +21,8 @@ class UserPreferenceUpdate(BaseModel):
     dev_mode: Optional[bool] = None
     default_provider: Optional[str] = None
     default_model: Optional[str] = None
+    ollama_api_url: Optional[str] = None
+    litert_api_url: Optional[str] = None
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
     context_length: Optional[int] = Field(default=None, ge=512, le=131072)
 

@@ -3,6 +3,8 @@ export interface UserPreferences {
   dev_mode: boolean
   default_provider: 'liteRT' | 'ollama'
   default_model: string | null
+  ollama_api_url: string
+  litert_api_url: string
   temperature: number
   context_length: number
 }
@@ -20,6 +22,8 @@ export interface UserPreferencesUpdate {
   dev_mode?: boolean
   default_provider?: 'liteRT' | 'ollama'
   default_model?: string | null
+  ollama_api_url?: string
+  litert_api_url?: string
   temperature?: number
   context_length?: number
 }

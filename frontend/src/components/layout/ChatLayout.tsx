@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, FormEvent, KeyboardEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import api from '../../lib/api'
 import { Card } from '../ui/card'
 import {
   useConversations,
@@ -43,6 +44,45 @@ interface Metrics {
   tokensPerSec: number | null
   inputTokens: number
   outputTokens: number
+  dbQueryMs?: number | null
+  dbWriteMs?: number | null
+  contextBuildMs?: number | null
+  tokenCountMs?: number | null
+  modelCallMs?: number | null
+  prefillMs?: number | null
+  selectedMessageCount?: number | null
+  totalMessageCount?: number | null
+  totalHistoryTokens?: number | null
+  contextBudgetTokens?: number | null
+  responseTokenReserve?: number | null
+  summaryUsed?: boolean
+  summaryGenerationMs?: number | null
+  cacheHit?: boolean
+}
+
+interface BackendMetricsEvent {
+  type: 'metrics'
+  phase: 'context_ready' | 'completed'
+  metrics: {
+    db_query_ms?: number
+    db_write_ms?: number
+    context_build_ms?: number
+    token_count_ms?: number
+    model_call_ms?: number
+    prefill_ms?: number
+    ttft_ms?: number
+    generation_tokens_per_sec?: number
+    input_tokens?: number
+    output_tokens?: number
+    selected_message_count?: number
+    total_message_count?: number
+    total_history_tokens?: number
+    context_budget_tokens?: number
+    response_token_reserve?: number
+    summary_used?: boolean
+    summary_generation_ms?: number
+    cache_hit?: boolean
+  }
 }
 
 type PendingAttachment = ChatAttachment & { id: string }
@@ -96,6 +136,10 @@ function formatDuration(durationMs: number): string {
     return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`
   }
   return `${(durationMs / 1000).toFixed(2)} s`
+}
+
+function getMessageMetricKey(conversationId: number, messageId: number): string {
+  return `${conversationId}:${messageId}`
 }
 
 function isTextFile(file: File): boolean {
@@ -184,6 +228,7 @@ export default function ChatLayout() {
   const [streamingContent, setStreamingContent, resetStreamingContent] = useRafState('')
   const [pendingUserMessage, setPendingUserMessage] = useState<string | null>(null)
   const [lastMetrics, setLastMetrics, resetLastMetrics] = useRafState<Metrics | null>(null)
+  const [messageMetrics, setMessageMetrics] = useState<Record<string, Metrics>>({})
 
   // Queries & Mutations
   const { data: conversations = [], isLoading: isLoadingList } = useConversations(searchDebounced)
@@ -494,6 +539,80 @@ export default function ChatLayout() {
 
         const decoder = new TextDecoder('utf-8')
         let buffer = ''
+        let currentEvent = 'message'
+        let currentDataLines: string[] = []
+
+        const flushSseEvent = () => {
+          if (currentDataLines.length === 0) {
+            currentEvent = 'message'
+            return
+          }
+
+          const payloadText = currentDataLines.join('\n').trim()
+          currentDataLines = []
+
+          if (!payloadText || payloadText === '[DONE]') {
+            currentEvent = 'message'
+            return
+          }
+
+          try {
+            const parsed = JSON.parse(payloadText)
+
+            if (currentEvent === 'metrics' && parsed.type === 'metrics') {
+              const metricsEvent = parsed as BackendMetricsEvent
+              currentMetrics.dbQueryMs = metricsEvent.metrics.db_query_ms ?? currentMetrics.dbQueryMs ?? null
+              currentMetrics.dbWriteMs = metricsEvent.metrics.db_write_ms ?? currentMetrics.dbWriteMs ?? null
+              currentMetrics.contextBuildMs = metricsEvent.metrics.context_build_ms ?? currentMetrics.contextBuildMs ?? null
+              currentMetrics.tokenCountMs = metricsEvent.metrics.token_count_ms ?? currentMetrics.tokenCountMs ?? null
+              currentMetrics.modelCallMs = metricsEvent.metrics.model_call_ms ?? currentMetrics.modelCallMs ?? null
+              currentMetrics.prefillMs = metricsEvent.metrics.prefill_ms ?? currentMetrics.prefillMs ?? null
+              currentMetrics.ttft = metricsEvent.metrics.ttft_ms ?? currentMetrics.ttft
+              currentMetrics.tokensPerSec = metricsEvent.metrics.generation_tokens_per_sec ?? currentMetrics.tokensPerSec
+              currentMetrics.inputTokens = metricsEvent.metrics.input_tokens ?? currentMetrics.inputTokens
+              currentMetrics.outputTokens = metricsEvent.metrics.output_tokens ?? currentMetrics.outputTokens
+              currentMetrics.selectedMessageCount = metricsEvent.metrics.selected_message_count ?? currentMetrics.selectedMessageCount ?? null
+              currentMetrics.totalMessageCount = metricsEvent.metrics.total_message_count ?? currentMetrics.totalMessageCount ?? null
+              currentMetrics.totalHistoryTokens = metricsEvent.metrics.total_history_tokens ?? currentMetrics.totalHistoryTokens ?? null
+              currentMetrics.contextBudgetTokens = metricsEvent.metrics.context_budget_tokens ?? currentMetrics.contextBudgetTokens ?? null
+              currentMetrics.responseTokenReserve = metricsEvent.metrics.response_token_reserve ?? currentMetrics.responseTokenReserve ?? null
+              currentMetrics.summaryUsed = metricsEvent.metrics.summary_used ?? currentMetrics.summaryUsed ?? false
+              currentMetrics.summaryGenerationMs = metricsEvent.metrics.summary_generation_ms ?? currentMetrics.summaryGenerationMs ?? null
+              currentMetrics.cacheHit = metricsEvent.metrics.cache_hit ?? currentMetrics.cacheHit ?? false
+              if (metricsEvent.phase === 'completed' && currentMetrics.modelCallMs !== null && currentMetrics.modelCallMs !== undefined) {
+                currentMetrics.generationTime = Math.round(currentMetrics.modelCallMs)
+              }
+              setLastMetrics({ ...currentMetrics })
+              currentEvent = 'message'
+              return
+            }
+
+            const chunk = parsed.choices?.[0]?.delta?.content || ''
+            if (!chunk) {
+              currentEvent = 'message'
+              return
+            }
+
+            if (!firstTokenReceived) {
+              firstTokenReceived = true
+              currentMetrics.ttft = currentMetrics.ttft ?? Math.round(performance.now() - startTime)
+            }
+
+            accumulatedText += chunk
+            pendingStreamingBufferRef.current += chunk
+            scheduleStreamingFlush()
+            tokenCount += Math.max(1, Math.ceil(chunk.length / 4))
+
+            const elapsedSecs = (performance.now() - startTime) / 1000
+            currentMetrics.tokensPerSec = elapsedSecs > 0 ? Math.round(tokenCount / elapsedSecs) : 0
+            currentMetrics.outputTokens = tokenCount
+            setLastMetrics({ ...currentMetrics })
+          } catch (err) {
+            console.error('Error al parsear evento SSE:', err, 'Payload:', payloadText)
+          } finally {
+            currentEvent = 'message'
+          }
+        }
 
         while (true) {
           const { done, value } = await reader.read()
@@ -504,45 +623,28 @@ export default function ChatLayout() {
           buffer = lines.pop() || ''
 
           for (const line of lines) {
-            const cleanLine = line.trim()
-            if (!cleanLine) continue
-            if (cleanLine === 'data: [DONE]') {
-              continue
-            }
-            if (cleanLine.startsWith('data: ')) {
-              try {
-                const dataStr = cleanLine.substring(6).trim()
-                if (!dataStr) continue
-                const parsed = JSON.parse(dataStr)
-                const chunk = parsed.choices?.[0]?.delta?.content || ''
-                if (!chunk) continue
-
-                if (!firstTokenReceived) {
-                  firstTokenReceived = true
-                  currentMetrics.ttft = Math.round(performance.now() - startTime)
-                }
-
-                accumulatedText += chunk
-                pendingStreamingBufferRef.current += chunk
-                scheduleStreamingFlush()
-                tokenCount += Math.max(1, Math.ceil(chunk.length / 4))
-
-                const elapsedSecs = (performance.now() - startTime) / 1000
-                currentMetrics.tokensPerSec = elapsedSecs > 0 ? Math.round(tokenCount / elapsedSecs) : 0
-                currentMetrics.outputTokens = tokenCount
-                setLastMetrics({ ...currentMetrics })
-              } catch (err) {
-                console.error('Error al parsear fragmento SSE:', err, 'Línea:', cleanLine)
+              const cleanLine = line.replace(/\r$/, '')
+              if (!cleanLine.trim()) {
+                flushSseEvent()
+                continue
               }
-            }
+              if (cleanLine.startsWith('event:')) {
+                currentEvent = cleanLine.substring(6).trim() || 'message'
+                continue
+              }
+              if (cleanLine.startsWith('data:')) {
+                currentDataLines.push(cleanLine.substring(5).trimStart())
+              }
           }
         }
 
+          flushSseEvent()
+
         const endTime = performance.now()
         const duration = endTime - startTime
-        currentMetrics.generationTime = Math.round(duration)
+          currentMetrics.generationTime = currentMetrics.generationTime ?? Math.round(duration)
         const elapsedSecs = duration / 1000
-        currentMetrics.tokensPerSec = elapsedSecs > 0 ? Math.round(tokenCount / elapsedSecs) : 0
+          currentMetrics.tokensPerSec = currentMetrics.tokensPerSec ?? (elapsedSecs > 0 ? Math.round(tokenCount / elapsedSecs) : 0)
         setLastMetrics({ ...currentMetrics })
 
         if (shouldAutoTitle) {
@@ -554,6 +656,25 @@ export default function ChatLayout() {
 
         await queryClient.invalidateQueries({ queryKey: ['conversation', activeId] })
         await queryClient.invalidateQueries({ queryKey: ['conversations'] })
+
+        if (activeId && accumulatedText.trim()) {
+          try {
+            const response = await api.get(`/api/v1/conversations/${activeId}`)
+            const refreshedConversation = response.data as Conversation
+            const latestAssistantMessage = [...refreshedConversation.messages]
+              .reverse()
+              .find((message) => message.role === 'assistant' && message.content.trim() === accumulatedText.trim())
+
+            if (latestAssistantMessage) {
+              setMessageMetrics((current) => ({
+                ...current,
+                [getMessageMetricKey(activeId, latestAssistantMessage.id)]: { ...currentMetrics },
+              }))
+            }
+          } catch (metricError) {
+            console.error('Error al asociar métricas al mensaje generado:', metricError)
+          }
+        }
       } catch (err: any) {
         console.error('Error durante la generación:', err)
       } finally {
@@ -851,6 +972,9 @@ export default function ChatLayout() {
                   activeConversation.messages.map((message, index) => {
                     const isUser = message.role === 'user'
                     const isLastMessage = index === activeConversation.messages.length - 1
+                    const currentMessageMetrics = !isUser
+                      ? messageMetrics[getMessageMetricKey(activeConversation.id, message.id)]
+                      : null
 
                     return (
                       <div key={message.id} className="space-y-1">
@@ -873,11 +997,21 @@ export default function ChatLayout() {
                                 </svg>
                                 Reintentar
                               </button>
-                              {lastMetrics && lastMetrics.generationTime !== null && (
+                              {(currentMessageMetrics ?? lastMetrics) && (currentMessageMetrics ?? lastMetrics)!.generationTime !== null && (
                                 <span className="rounded-full border border-slate-700 bg-slate-950/90 px-2 py-1 text-[10px] text-slate-500">
-                                  {formatDuration(lastMetrics.generationTime)} · {lastMetrics.tokensPerSec ?? 0} t/s
+                                  {formatDuration((currentMessageMetrics ?? lastMetrics)!.generationTime!)} · {(currentMessageMetrics ?? lastMetrics)!.tokensPerSec ?? 0} t/s
                                 </span>
                               )}
+                            </div>
+                          </div>
+                        )}
+
+                        {!isUser && !isLastMessage && currentMessageMetrics && currentMessageMetrics.generationTime !== null && (
+                          <div className="flex flex-col gap-2 pl-2">
+                            <div className="flex items-center gap-3">
+                              <span className="rounded-full border border-slate-700 bg-slate-950/90 px-2 py-1 text-[10px] text-slate-500">
+                                {formatDuration(currentMessageMetrics.generationTime)} · {currentMessageMetrics.tokensPerSec ?? 0} t/s
+                              </span>
                             </div>
                           </div>
                         )}
@@ -931,6 +1065,19 @@ export default function ChatLayout() {
                         {lastMetrics.inputTokens} / {lastMetrics.outputTokens}
                       </span>
                     </div>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-4 border-t border-slate-900 pt-3 text-[11px] font-mono text-slate-400 sm:grid-cols-3">
+                    <span>DB read: {lastMetrics.dbQueryMs ?? 0} ms</span>
+                    <span>DB write: {lastMetrics.dbWriteMs ?? 0} ms</span>
+                    <span>Contexto: {lastMetrics.contextBuildMs ?? 0} ms</span>
+                    <span>Tokens: {lastMetrics.tokenCountMs ?? 0} ms</span>
+                    <span>Prefill: {lastMetrics.prefillMs ?? 0} ms</span>
+                    <span>Model call: {lastMetrics.modelCallMs ?? 0} ms</span>
+                    <span>Msgs: {lastMetrics.selectedMessageCount ?? 0} / {lastMetrics.totalMessageCount ?? 0}</span>
+                    <span>Hist tokens: {lastMetrics.totalHistoryTokens ?? 0}</span>
+                    <span>Budget/reserva: {lastMetrics.contextBudgetTokens ?? 0} / {lastMetrics.responseTokenReserve ?? 0}</span>
+                    <span>Resumen: {lastMetrics.summaryUsed ? `si (${lastMetrics.summaryGenerationMs ?? 0} ms)` : 'no'}</span>
+                    <span>Cache: {lastMetrics.cacheHit ? 'hit' : 'miss'}</span>
                   </div>
                 </div>
               )}
