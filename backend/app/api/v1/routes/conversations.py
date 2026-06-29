@@ -211,6 +211,8 @@ def chat(
         ]
 
     history_enabled = chat_request.enable_context_history is not False
+    if history_enabled and settings.history_response_token_cap > 0:
+        response_token_reserve = min(response_token_reserve, settings.history_response_token_cap)
 
     if history_enabled and settings.enable_conversation_summary:
         if settings.summary_in_request_path:

@@ -73,6 +73,37 @@ def estimate_text_tokens(text: str | None) -> int:
     return max(1, math.ceil(len(text) / 4))
 
 
+def _truncate_history_content(content: Any, max_chars: int) -> Any:
+    if max_chars <= 0:
+        return content
+
+    if isinstance(content, str):
+        if len(content) <= max_chars:
+            return content
+        return f"{content[:max_chars].rstrip()}..."
+
+    if isinstance(content, list):
+        truncated_items: list[Any] = []
+        for item in content:
+            if not isinstance(item, dict):
+                truncated_items.append(item)
+                continue
+
+            if item.get('type') == 'text' and isinstance(item.get('text'), str):
+                text_value = item['text']
+                if len(text_value) > max_chars:
+                    next_item = dict(item)
+                    next_item['text'] = f"{text_value[:max_chars].rstrip()}..."
+                    truncated_items.append(next_item)
+                else:
+                    truncated_items.append(item)
+            else:
+                truncated_items.append(item)
+        return truncated_items
+
+    return content
+
+
 def load_messages_for_context(db: Session, conversation_id: int) -> tuple[list[Message], int]:
     started_at = time.perf_counter()
     messages = (
@@ -188,22 +219,26 @@ def build_conversation_context_from_messages(
             additional_tokens = 0
             max_additional_messages = max(0, settings.history_recent_messages_cap)
             max_additional_tokens = max(0, settings.history_recent_tokens_cap)
+            max_message_chars = max(0, settings.history_message_char_cap)
 
             for message in reversed(candidate_messages[:-1]):
                 if max_additional_messages > 0 and additional_messages >= max_additional_messages:
                     break
 
-                projected_additional_tokens = additional_tokens + message['tokens']
+                truncated_content = _truncate_history_content(message['content'], max_message_chars)
+                message_tokens = estimate_message_tokens(message['role'], truncated_content)
+
+                projected_additional_tokens = additional_tokens + message_tokens
                 if max_additional_tokens > 0 and projected_additional_tokens > max_additional_tokens:
                     break
 
-                projected_tokens = consumed_tokens + message['tokens']
+                projected_tokens = consumed_tokens + message_tokens
                 if projected_tokens > context_budget_tokens:
                     break
 
                 selected_messages.insert(0, {
                     'role': message['role'],
-                    'content': message['content'],
+                    'content': truncated_content,
                 })
                 consumed_tokens = projected_tokens
                 additional_messages += 1
