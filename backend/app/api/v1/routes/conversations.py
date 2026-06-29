@@ -23,6 +23,7 @@ from app.schemas.conversation import (
 from app.services.chat import (
     build_model_payload,
     resolve_provider_model,
+    normalize_model_name,
     stream_provider_response,
     save_assistant_message,
 )
@@ -223,6 +224,20 @@ def chat(
         response_token_reserve = min(response_token_reserve, settings.history_response_token_cap)
 
     def prepare_http_inference_state() -> tuple[SummaryRefreshResult, object, dict]:
+        fallback_model_candidate = model_name
+        if use_litert_sdk:
+            fallback_model_candidate = normalize_model_name(model_name)
+
+        try:
+            http_resolved_model = resolve_provider_model(
+                provider_name,
+                fallback_model_candidate,
+                current_user.preferences,
+                use_sdk=False,
+            )
+        except RuntimeError:
+            http_resolved_model = fallback_model_candidate or resolved_model_name
+
         if history_enabled and settings.enable_conversation_summary:
             summary_threshold_reached = len(raw_messages) >= settings.summary_trigger_messages
             if settings.summary_in_request_path:
@@ -280,7 +295,7 @@ def chat(
 
         payload_local = build_model_payload(
             provider_name,
-            resolved_model_name,
+            http_resolved_model,
             temperature,
             response_token_reserve,
             context_result_local.messages,
@@ -423,14 +438,29 @@ def chat(
                 metrics['total_history_tokens'] = context_result_http.total_history_tokens
                 yield build_metrics_event('context_ready', metrics)
 
-                for chunk in stream_provider_response(
-                    provider_name,
-                    current_user.preferences,
-                    payload_http,
-                    assistant_parts,
-                    on_first_token=mark_first_token,
-                ):
-                    yield chunk
+                try:
+                    for chunk in stream_provider_response(
+                        provider_name,
+                        current_user.preferences,
+                        payload_http,
+                        assistant_parts,
+                        on_first_token=mark_first_token,
+                    ):
+                        yield chunk
+                except RuntimeError as fallback_exc:
+                    error_text = f'Error del proveedor: {fallback_exc}'
+                    assistant_parts.append(error_text)
+                    error_payload = {
+                        'choices': [
+                            {
+                                'delta': {
+                                    'content': error_text,
+                                }
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n".encode('utf-8')
+                    yield b'data: [DONE]\n\n'
                 return
 
             error_text = f'Error del proveedor: {exc}'

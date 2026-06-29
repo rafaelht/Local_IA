@@ -85,8 +85,8 @@ def _read_json_response(request: urllib.request.Request, timeout: int = 10) -> d
         return json.loads(response.read().decode('utf-8'))
 
 
-def list_provider_models(provider: str, preferences: object | None = None) -> list[dict]:
-    if provider == 'liteRT' and settings.litert_sdk_enabled:
+def list_provider_models(provider: str, preferences: object | None = None, use_sdk: bool = True) -> list[dict]:
+    if provider == 'liteRT' and settings.litert_sdk_enabled and use_sdk:
         return litert_conversation_manager.list_models()
 
     base_url = get_provider_base_url(provider, preferences)
@@ -127,12 +127,12 @@ def list_provider_models(provider: str, preferences: object | None = None) -> li
     return [model for model in models if isinstance(model, dict)]
 
 
-def check_provider_health(provider: str, preferences: object | None = None) -> bool:
-    if provider == 'liteRT' and settings.litert_sdk_enabled:
+def check_provider_health(provider: str, preferences: object | None = None, use_sdk: bool = True) -> bool:
+    if provider == 'liteRT' and settings.litert_sdk_enabled and use_sdk:
         return litert_conversation_manager.check_health()
 
     try:
-        list_provider_models(provider, preferences)
+        list_provider_models(provider, preferences, use_sdk=use_sdk)
         return True
     except RuntimeError:
         return False
@@ -153,8 +153,9 @@ def resolve_provider_model(
     provider: str,
     model: str | None,
     preferences: object | None = None,
+    use_sdk: bool = True,
 ) -> str:
-    if provider == 'liteRT' and settings.litert_sdk_enabled:
+    if provider == 'liteRT' and settings.litert_sdk_enabled and use_sdk:
         sdk_model_path = settings.litert_sdk_model_path.strip()
         if not sdk_model_path:
             raise RuntimeError('LITERT_SDK_MODEL_PATH is required when LITERT_SDK_ENABLED=true')
@@ -164,7 +165,7 @@ def resolve_provider_model(
     if normalized_model is not None:
         return normalized_model
 
-    models = list_provider_models(provider, preferences)
+    models = list_provider_models(provider, preferences, use_sdk=use_sdk)
     for model_info in models:
         if not isinstance(model_info, dict):
             continue
