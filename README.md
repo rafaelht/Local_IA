@@ -3,7 +3,7 @@
 Esta fase inicial crea la arquitectura base de un cliente web React + backend FastAPI con SQLite.
 
 ## Qué incluye
-- Estructura modular separando frontend/backend
+- Estructura modular separando frontend/backend de forma fácil
 - React + Vite + TypeScript + TailwindCSS
 - FastAPI con JWT / SQLite / SQLAlchemy
 - Docker Compose para levantar frontend y backend
