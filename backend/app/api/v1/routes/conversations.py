@@ -22,6 +22,7 @@ from app.schemas.conversation import (
 )
 from app.services.chat import (
     build_model_payload,
+    resolve_provider_model,
     stream_provider_response,
     save_assistant_message,
 )
@@ -181,6 +182,10 @@ def chat(
 
     provider_name = chat_request.provider or getattr(current_user.preferences, 'default_provider', 'liteRT')
     model_name = chat_request.model or getattr(current_user.preferences, 'default_model', None)
+    try:
+        resolved_model_name = resolve_provider_model(provider_name, model_name, current_user.preferences)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     temperature = chat_request.temperature if chat_request.temperature is not None else getattr(current_user.preferences, 'temperature', 0.7)
     response_token_reserve = chat_request.max_tokens if chat_request.max_tokens is not None else getattr(current_user.preferences, 'context_length', settings.response_token_reserve)
 
@@ -229,7 +234,7 @@ def chat(
         db_query_ms=db_query_ms,
     )
 
-    payload = build_model_payload(provider_name, model_name, temperature, response_token_reserve, context_result.messages)
+    payload = build_model_payload(provider_name, resolved_model_name, temperature, response_token_reserve, context_result.messages)
     assistant_parts: list[str] = []
     metrics: dict[str, int | float | bool | None] = {
         'db_write_ms': db_write_ms,

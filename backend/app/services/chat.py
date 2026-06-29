@@ -13,6 +13,7 @@ from app.db.models import Message
 
 
 SUPPORTED_PROVIDERS = {'liteRT', 'ollama'}
+INVALID_MODEL_SENTINELS = {'default'}
 
 
 def normalize_provider_url(raw_url: str) -> str:
@@ -130,16 +131,49 @@ def check_provider_health(provider: str, preferences: object | None = None) -> b
         return False
 
 
-def build_model_payload(
+def normalize_model_name(model: str | None) -> str | None:
+    if model is None:
+        return None
+    normalized = model.strip()
+    if not normalized:
+        return None
+    if normalized.lower() in INVALID_MODEL_SENTINELS:
+        return None
+    return normalized
+
+
+def resolve_provider_model(
     provider: str,
     model: str | None,
+    preferences: object | None = None,
+) -> str:
+    normalized_model = normalize_model_name(model)
+    if normalized_model is not None:
+        return normalized_model
+
+    models = list_provider_models(provider, preferences)
+    for model_info in models:
+        if not isinstance(model_info, dict):
+            continue
+        candidate = model_info.get('id') or model_info.get('name')
+        if isinstance(candidate, str):
+            normalized_candidate = normalize_model_name(candidate)
+            if normalized_candidate is not None:
+                return normalized_candidate
+
+    raise RuntimeError('No available model found for provider')
+
+
+def build_model_payload(
+    provider: str,
+    model: str,
     temperature: float | None,
     max_tokens: int | None,
     messages: list[dict],
     mode: str = 'openai',
 ) -> dict:
     resolved_temperature = temperature if temperature is not None else 0.7
-    resolved_model = model or 'default'
+    resolved_model = model
 
     if mode == 'ollama-native':
         payload = {
@@ -173,8 +207,9 @@ def generate_provider_completion(
     max_tokens: int | None,
     messages: list[dict],
 ) -> str:
+    resolved_model = resolve_provider_model(provider, model, preferences)
     provider_url = get_provider_url(provider, preferences)
-    payload = build_model_payload(provider, model, temperature, max_tokens, messages)
+    payload = build_model_payload(provider, resolved_model, temperature, max_tokens, messages)
     payload['stream'] = False
     body = json.dumps(payload).encode('utf-8')
     request = urllib.request.Request(
@@ -193,7 +228,7 @@ def generate_provider_completion(
             native_provider_url = get_provider_native_url(provider, preferences)
             native_payload = build_model_payload(
                 provider,
-                model,
+                resolved_model,
                 temperature,
                 max_tokens,
                 messages,

@@ -791,13 +791,8 @@ export default function ChatLayout() {
                   aria-label="Buscar conversaciones"
                   value={searchVal}
                   onChange={(e) => setSearchVal(e.target.value)}
-                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 pl-10 pr-8 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400 transition"
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 pl-3 pr-8 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400 transition"
                 />
-                <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-slate-500">
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                  </svg>
-                </div>
                 {searchVal && (
                   <button
                     onClick={() => setSearchVal('')}
