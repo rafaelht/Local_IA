@@ -62,6 +62,7 @@ def update_preferences(
     db: Session = Depends(get_db),
 ) -> UserPreference:
     preferences = get_or_create_user_preferences(db, current_user.id)
+    provided_fields = preferences_update.model_fields_set
 
     if preferences_update.theme is not None:
         if preferences_update.theme not in {'dark', 'light'}:
@@ -72,8 +73,12 @@ def update_preferences(
     if preferences_update.default_provider is not None:
         if preferences_update.default_provider not in SUPPORTED_PROVIDERS:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Proveedor inválido')
+        provider_changed = preferences.default_provider != preferences_update.default_provider
         preferences.default_provider = preferences_update.default_provider
-    if preferences_update.default_model is not None:
+        if provider_changed and 'default_model' not in provided_fields:
+            # Avoid carrying over a model name that belongs to another provider.
+            preferences.default_model = None
+    if 'default_model' in provided_fields:
         preferences.default_model = preferences_update.default_model or None
     if preferences_update.ollama_api_url is not None:
         try:
