@@ -11,7 +11,6 @@ from app.db.models import ConversationSummary, Message
 from app.services.chat import generate_provider_completion
 from app.services.conversation_context import (
     estimate_message_tokens,
-    estimate_text_tokens,
     normalize_messages,
 )
 
@@ -22,6 +21,20 @@ class SummaryRefreshResult:
     covered_until_message_id: int | None
     summary_generation_ms: int
     summary_used: bool
+
+
+def get_conversation_summary_state(db: Session, conversation_id: int) -> SummaryRefreshResult:
+    existing_summary = (
+        db.query(ConversationSummary)
+        .filter(ConversationSummary.conversation_id == conversation_id)
+        .first()
+    )
+    return SummaryRefreshResult(
+        summary_text=existing_summary.summary_text if existing_summary else None,
+        covered_until_message_id=existing_summary.covered_until_message_id if existing_summary else None,
+        summary_generation_ms=0,
+        summary_used=existing_summary is not None,
+    )
 
 
 def _stringify_message_content(content: object) -> str:

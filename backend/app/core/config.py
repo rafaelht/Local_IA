@@ -33,6 +33,8 @@ class Settings:
     history_max_prompt_tokens: int = int(os.getenv('HISTORY_MAX_PROMPT_TOKENS', '1536'))
     history_recent_messages_cap: int = int(os.getenv('HISTORY_RECENT_MESSAGES_CAP', '6'))
     history_recent_tokens_cap: int = int(os.getenv('HISTORY_RECENT_TOKENS_CAP', '1024'))
+    enable_conversation_summary: bool = _parse_bool(os.getenv('ENABLE_CONVERSATION_SUMMARY'), True)
+    summary_in_request_path: bool = _parse_bool(os.getenv('SUMMARY_IN_REQUEST_PATH'), False)
     image_token_cost: int = int(os.getenv('IMAGE_TOKEN_COST', '256'))
     summary_trigger_messages: int = int(os.getenv('SUMMARY_TRIGGER_MESSAGES', '8'))
     summary_trigger_tokens: int = int(os.getenv('SUMMARY_TRIGGER_TOKENS', '1400'))

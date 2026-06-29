@@ -30,6 +30,7 @@ from app.services.conversation_context import build_conversation_context_from_me
 from app.services.conversation_cache import active_conversation_cache
 from app.services.conversation_summary import maybe_refresh_conversation_summary
 from app.services.conversation_summary import SummaryRefreshResult
+from app.services.conversation_summary import get_conversation_summary_state
 
 
 logger = logging.getLogger(__name__)
@@ -211,16 +212,19 @@ def chat(
 
     history_enabled = chat_request.enable_context_history is not False
 
-    if history_enabled:
-        summary_result = maybe_refresh_conversation_summary(
-            db,
-            conversation.id,
-            raw_messages,
-            provider_name,
-            current_user.preferences,
-            model_name,
-            temperature,
-        )
+    if history_enabled and settings.enable_conversation_summary:
+        if settings.summary_in_request_path:
+            summary_result = maybe_refresh_conversation_summary(
+                db,
+                conversation.id,
+                raw_messages,
+                provider_name,
+                current_user.preferences,
+                model_name,
+                temperature,
+            )
+        else:
+            summary_result = get_conversation_summary_state(db, conversation.id)
     else:
         summary_result = SummaryRefreshResult(
             summary_text=None,
